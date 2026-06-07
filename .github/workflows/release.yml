@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  binaries:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64,  goflags: "" }
+          - { goos: linux,   goarch: arm64,  goflags: "" }
+          - { goos: linux,   goarch: arm,    goflags: "GOARM=6" }
+          - { goos: linux,   goarch: mips,   goflags: "GOMIPS=softfloat" }
+          - { goos: linux,   goarch: mipsle, goflags: "GOMIPS=softfloat" }
+          - { goos: darwin,  goarch: amd64,  goflags: "" }
+          - { goos: darwin,  goarch: arm64,  goflags: "" }
+          - { goos: freebsd, goarch: amd64,  goflags: "" }
+          - { goos: windows, goarch: amd64,  goflags: "" }
+          - { goos: windows, goarch: arm64,  goflags: "" }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+      - name: Build
+        run: |
+          ext=""
+          [ "${{ matrix.goos }}" = "windows" ] && ext=".exe"
+          target="qvole-${{ matrix.goos }}-${{ matrix.goarch }}${ext}"
+          strip=""
+          case "${{ matrix.goarch }}" in mips|mipsle) strip="-s -w" ;; esac
+          env ${{ matrix.goflags }} GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -ldflags="${strip} -X main.version=${{ github.ref_name }}" \
+            -o "$target" ./cmd/qvole
+          echo "target=$target" >> $GITHUB_ENV
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: qvole-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ${{ env.target }}
+
+  release:
+    needs: binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: qvole-*
+          path: artifacts
+          merge-multiple: true
+      - run: ls -lh artifacts/
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+

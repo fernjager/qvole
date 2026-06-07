@@ -1,0 +1,28 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - unconvert
+    - unparam
+  exclusions:
+    rules:
+      - linters: [errcheck]
+        text: "Error return value of `(io\\.(CopyBuffer|Copy|ReadAll)|.*Close(WithError)?|log\\.Output|rand\\.Read|binary\\.Write|.*Set(Read|Write)?Deadline|.*WriteTo|.*Write(?:|.*)|.*Process\\.Kill|.*\\.Wait|.*\\.Run|syscall\\.SetsockoptInt|os\\.(Setenv|Unsetenv|RemoveAll)|qvole\\..*)` is not checked"
+      - linters: [staticcheck]
+        text: "(SA1019|SA6002|SA9003|QF1012)"
+      - linters: [unconvert]
+        text: "unnecessary conversion"
+      - linters: [unparam]
+        text: "(is unused|always receives|is never used)"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
