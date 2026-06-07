@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+      - run: go test -race -v -count=1 -coverprofile=coverage.out $(go list ./... | grep -v /tests)
+      - name: Coverage report
+        run: go tool cover -func=coverage.out
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+      - run: go test -v -count=1 ./tests/
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+      - run: |
+          for target in FuzzNameplate FuzzSplitTunnelRequest FuzzPasswordToScalar \
+                        FuzzEncryptDecrypt FuzzGenerateCode FuzzHandlePacket \
+                        FuzzDecryptMetadata FuzzComputeShared FuzzVerifyConfirm; do
+            echo "--- $target ---"
+            exit_code=0
+            go test -fuzz="$target" -fuzztime=30s -run="^$" ./cmd/qvole/ || exit_code=$?
+            if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 1 ]; then exit "$exit_code"; fi
+          done

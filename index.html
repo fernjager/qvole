@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Fast tunnels over QUIC, burrowed through NATs. Encrypted peer-to-peer pipes, port forwarding, and remote commands with a single binary.">
+<meta name="color-scheme" content="dark">
+<title>qvole</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #1a1612;
+    --card: #24201a;
+    --border: #3b342a;
+    --text: #eaf4e1;
+    --muted: #a0ad96;
+    --accent: #b08457;
+    --accent-light: #e6c3a0;
+    --code-bg: #12100e;
+    --green: #88c070;
+  }
+  html { font-size: 18px; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  main { flex: 1; }
+  .wrap {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+  header {
+    text-align: center;
+    padding: 80px 0 48px;
+  }
+  header img { width: 96px; height: 96px; }
+  header h1 { font-size: 2.4rem; font-weight: 800; margin: 16px 0 8px; letter-spacing: -0.5px; }
+  header p  { color: var(--muted); font-size: 1.1rem; max-width: 440px; margin: 0 auto; }
+
+  .install {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+    margin: 0 0 64px;
+    text-align: center;
+  }
+  .install label { display: block; color: var(--muted); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+  .install .cmd-line {
+    display: inline-flex;
+    align-items: center;
+    gap: 0;
+    background: var(--code-bg);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .install code {
+    font-size: 0.95rem;
+    padding: 12px 24px;
+    word-break: break-all;
+    user-select: all;
+  }
+  .install .copy-btn {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    padding: 12px 14px;
+    line-height: 0;
+    transition: color .15s;
+  }
+  .install .copy-btn:hover { color: var(--accent-light); }
+  .install .copy-btn:active { color: var(--green); }
+
+  .features {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin: 0 0 64px;
+  }
+  .feature {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+  }
+  .feature h2 { font-size: 1.05rem; font-weight: 700; margin-bottom: 8px; }
+  .feature h2 code { background: var(--code-bg); color: var(--accent-light); font-size: 0.88rem; padding: 2px 8px; border-radius: 4px; }
+  .feature p { color: var(--muted); font-size: 0.9rem; }
+
+  .examples { margin: 0 0 64px; }
+  .examples h2 { font-size: 1.3rem; margin-bottom: 20px; }
+  .example {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .example .label { color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; }
+  .example pre {
+    background: var(--code-bg);
+    border-radius: 6px;
+    padding: 14px 18px;
+    overflow-x: auto;
+    font-size: 0.88rem;
+    line-height: 1.7;
+  }
+  .example code { font-family: "SF Mono", "Fira Code", "JetBrains Mono", Menlo, Consolas, monospace; }
+  .example .prompt { color: var(--green); user-select: none; }
+  .example .comment { color: #6a7664; }
+
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 32px 0 48px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+  footer a { color: var(--accent-light); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+  footer .sep { color: var(--border); margin: 0 8px; }
+
+  @media (max-width: 600px) {
+    .features { grid-template-columns: 1fr; }
+    header { padding: 48px 0 32px; }
+    header h1 { font-size: 2rem; }
+    header img { width: 72px; height: 72px; }
+    .install code { font-size: 0.82rem; padding: 10px 16px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <br/>
+  <header class="wrap">
+    <img src="assets/logo.svg" width="96" height="96" alt="">
+    <h1>qvole</h1>
+    <i>Fast tunnels over QUIC, burrowed through NATs.</i>
+  </header>
+  <br/>
+  <div class="wrap">
+    <div class="install">
+      <label>Install</label>
+      <div class="cmd-line">
+        <code>curl -fsSL https://get.qvole.dev | sh</code>
+        <button class="copy-btn" onclick="copyCmd(this)" title="Copy to clipboard" aria-label="Copy to clipboard">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="features">
+      <div class="feature">
+        <h2><code>pipe</code></h2>
+        <p>Bidirectional stdin/stdout stream between two peers. Send files, stream data, or chain with Unix pipes.</p>
+      </div>
+      <div class="feature">
+        <h2><code>tunnel</code></h2>
+        <p>TCP port forwarding with -L and -R flags. Bind services to localhost and reach them on demand.</p>
+      </div>
+      <div class="feature">
+        <h2><code>exec</code></h2>
+        <p>Remote command execution. Run a shell, a script, or a single command on a peer machine.</p>
+      </div>
+      <div class="feature">
+        <h2><code>relay</code></h2>
+        <p>Run your own rendezvous relay. A single UDP port provides NAT hole punching and peer discovery.</p>
+      </div>
+    </div>
+
+    <div class="examples">
+      <h2>Quick Start</h2>
+      <div class="example">
+        <div class="label">Send a file</div>
+        <pre><code><span class="prompt">alice$</span> qvole pipe &gt; out
+<span class="comment"># prints connection code, waits for bob</span>
+<span class="prompt">bob$</span>   QVOLE_CODE=CODE qvole pipe &lt; in</code></pre>
+      </div>
+      <div class="example">
+        <div class="label">Port forwarding</div>
+        <pre><code><span class="prompt">alice$</span> qvole tunnel -L 8080:localhost:80 -R 2222:localhost:22
+<span class="prompt">bob$</span>   QVOLE_CODE=CODE qvole tunnel --allow-tunnel
+<span class="prompt">alice$</span> curl localhost:8080    <span class="comment"># reaches bob's :80</span>
+<span class="prompt">bob$</span>   ssh -p 2222 localhost <span class="comment"># reaches alice's sshd</span></code></pre>
+      </div>
+      <div class="example">
+        <div class="label">Remote shell</div>
+        <pre><code><span class="prompt">alice$</span> qvole exec --cmd "script -q bash /dev/null"
+<span class="prompt">bob$</span>   QVOLE_CODE=CODE qvole exec</code></pre>
+      </div>
+      <div class="example">
+        <div class="label">Run your own relay</div>
+        <pre><code><span class="prompt">relay$</span> qvole relay --listen :9009</code></pre>
+      </div>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <a href="https://github.com/fernjager/qvole">GitHub</a>
+    <span class="sep">|</span>
+    <a href="LICENSE">MIT License</a>
+    <span class="sep">|</span>
+    <a href="https://github.com/fernjager/qvole/blob/main/PRIVACY.md">Privacy &amp; Terms</a>
+    <span class="sep">|</span>
+    <a href="https://github.com/fernjager/qvole/blob/main/LIBRARY.md">Go Docs</a>
+    <br><br>
+    Built with Go &middot; End-to-end encrypted &middot; No accounts, no config
+  </div>
+</footer>
+<script>
+function copyCmd(btn) {
+  const code = btn.parentElement.querySelector('code').textContent;
+  navigator.clipboard.writeText(code).then(() => {
+    btn.style.color = '#88c070';
+    setTimeout(() => { btn.style.color = ''; }, 1500);
+  });
+}
+</script>
+</body>
+</html>

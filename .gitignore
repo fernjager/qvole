@@ -1,0 +1,8 @@
+/qvole
+/qvole-*
+bin/
+/.opencode/
+*.test
+.DS_Store
+*.prof
+*.out

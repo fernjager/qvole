@@ -1,0 +1,12 @@
+/.git
+/qvole
+/qvole-*
+/bin/
+/.github/
+/.opencode/
+/assets/
+/tests/
+*.test
+.DS_Store
+*.prof
+*.out

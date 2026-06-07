@@ -1,0 +1,7 @@
+services:
+  relay:
+    build: .
+    command: relay --listen :9009
+    ports:
+      - "9009:9009/udp"
+    restart: unless-stopped
