@@ -12,6 +12,8 @@ import (
 func setupRelayConns(t *testing.T) (relayConn *net.UDPConn, clientConn *net.UDPConn, clientAddr *net.UDPAddr) {
 	t.Helper()
 	resetRegRateLimits()
+	resetIPCounts()
+	resetRooms()
 	relayAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -31,6 +33,22 @@ func setupRelayConns(t *testing.T) (relayConn *net.UDPConn, clientConn *net.UDPC
 		clientConn.Close()
 	})
 	return relayConn, clientConn, clientAddr
+}
+
+// registerClient performs the full two-step REG cookie handshake.
+func registerClient(t *testing.T, relayConn, clientConn *net.UDPConn, clientAddr *net.UDPAddr, room string) {
+	t.Helper()
+	HandlePacket(relayConn, []byte("REG "+room+"\n"), clientAddr)
+	regLine := readUDPLine(t, clientConn, 500*time.Millisecond)
+	if !strings.HasPrefix(regLine, "REGD "+room+" ") {
+		t.Fatalf("expected REGD cookie challenge, got %q", regLine)
+	}
+	cookie := strings.TrimPrefix(regLine, "REGD "+room+" ")
+	HandlePacket(relayConn, []byte("REG "+room+" "+cookie+"\n"), clientAddr)
+	regLine2 := readUDPLine(t, clientConn, 500*time.Millisecond)
+	if !strings.HasPrefix(regLine2, "REGD "+room+" OK ") {
+		t.Fatalf("expected REGD OK confirmation, got %q", regLine2)
+	}
 }
 
 func uniqueRoom(prefix string) string {
@@ -105,13 +123,20 @@ func TestHandlePacket_UnknownCommand(t *testing.T) {
 func TestHandleReg_NewRoom(t *testing.T) {
 	relayConn, clientConn, clientAddr := setupRelayConns(t)
 	room := uniqueRoom("reg-new")
-	HandlePacket(relayConn, []byte("REG "+room+"\n"), clientAddr)
-
-	resp := readUDPLine(t, clientConn, 500*time.Millisecond)
-	expectPrefix := "REGD " + room + " "
-	if !strings.HasPrefix(resp, expectPrefix) {
-		t.Fatalf("expected 'REGD %s <addr>', got %q", room, resp)
+	registerClient(t, relayConn, clientConn, clientAddr, room)
+	// verify room exists
+	shard := shardFor(room)
+	shard.mu.RLock()
+	entry := shard.rooms[room]
+	shard.mu.RUnlock()
+	if entry == nil {
+		t.Fatal("room not created")
 	}
+	entry.mu.Lock()
+	if _, ok := entry.udpClients[clientAddr.String()]; !ok {
+		t.Fatal("client not registered")
+	}
+	entry.mu.Unlock()
 }
 
 func TestHandleReg_EmptyRoom(t *testing.T) {
@@ -139,15 +164,13 @@ func TestHandleReg_InvalidRoomName(t *testing.T) {
 func TestHandleReg_ReRegistration(t *testing.T) {
 	relayConn, clientConn, clientAddr := setupRelayConns(t)
 	room := uniqueRoom("reg-rereg")
-
-	HandlePacket(relayConn, []byte("REG "+room+"\n"), clientAddr)
-	readUDPLine(t, clientConn, 500*time.Millisecond)
-
+	registerClient(t, relayConn, clientConn, clientAddr, room)
+	// Re-reg (no cookie — should re-issue challenge with same cookie).
 	HandlePacket(relayConn, []byte("REG "+room+"\n"), clientAddr)
 	resp := readUDPLine(t, clientConn, 500*time.Millisecond)
 	expectPrefix := "REGD " + room + " "
 	if !strings.HasPrefix(resp, expectPrefix) {
-		t.Fatalf("expected 'REGD %s <addr>' on re-reg, got %q", room, resp)
+		t.Fatalf("expected REGD on re-reg, got %q", resp)
 	}
 }
 
@@ -161,11 +184,8 @@ func TestHandleMsg_ForwardToOtherClient(t *testing.T) {
 	client2Addr := client2Conn.LocalAddr().(*net.UDPAddr)
 
 	room := uniqueRoom("msg-fwd")
-
-	HandlePacket(relayConn, []byte("REG "+room+"\n"), client1Addr)
-	readUDPLine(t, client1Conn, 500*time.Millisecond)
-	HandlePacket(relayConn, []byte("REG "+room+"\n"), client2Addr)
-	readUDPLine(t, client2Conn, 500*time.Millisecond)
+	registerClient(t, relayConn, client1Conn, client1Addr, room)
+	registerClient(t, relayConn, client2Conn, client2Addr, room)
 
 	HandlePacket(relayConn, []byte("MSG "+room+" spake2 deadbeef\n"), client1Addr)
 
@@ -186,10 +206,8 @@ func TestHandleMsg_SenderDoesNotReceiveOwnMessage(t *testing.T) {
 
 	room := uniqueRoom("msg-noecho")
 
-	HandlePacket(relayConn, []byte("REG "+room+"\n"), client1Addr)
-	readUDPLine(t, client1Conn, 500*time.Millisecond)
-	HandlePacket(relayConn, []byte("REG "+room+"\n"), client2Addr)
-	readUDPLine(t, client2Conn, 500*time.Millisecond)
+	registerClient(t, relayConn, client1Conn, client1Addr, room)
+	registerClient(t, relayConn, client2Conn, client2Addr, room)
 
 	HandlePacket(relayConn, []byte("MSG "+room+" confirm aabb\n"), client1Addr)
 
@@ -201,12 +219,129 @@ func TestHandleMsg_SenderDoesNotReceiveOwnMessage(t *testing.T) {
 	}
 }
 
+func TestHandleMsg_BroadcastToMultipleClients(t *testing.T) {
+	resetIPCounts()
+	relayConn, senderConn, senderAddr := setupRelayConns(t)
+
+	receiver1Conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen receiver1: %v", err)
+	}
+	defer receiver1Conn.Close()
+	receiver1Addr := receiver1Conn.LocalAddr().(*net.UDPAddr)
+
+	receiver2Conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen receiver2: %v", err)
+	}
+	defer receiver2Conn.Close()
+	receiver2Addr := receiver2Conn.LocalAddr().(*net.UDPAddr)
+
+	room := uniqueRoom("msg-bcast3")
+	registerClient(t, relayConn, senderConn, senderAddr, room)
+	registerClient(t, relayConn, receiver1Conn, receiver1Addr, room)
+	registerClient(t, relayConn, receiver2Conn, receiver2Addr, room)
+
+	HandlePacket(relayConn, []byte("MSG "+room+" spake2 beef3c01\n"), senderAddr)
+
+	resp1 := readUDPLine(t, receiver1Conn, 500*time.Millisecond)
+	if resp1 != "MSGD spake2 beef3c01" {
+		t.Fatalf("receiver1 expected 'MSGD spake2 beef3c01', got %q", resp1)
+	}
+
+	resp2 := readUDPLine(t, receiver2Conn, 500*time.Millisecond)
+	if resp2 != "MSGD spake2 beef3c01" {
+		t.Fatalf("receiver2 expected 'MSGD spake2 beef3c01', got %q", resp2)
+	}
+
+	senderConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	buf := make([]byte, 1500)
+	_, err = senderConn.Read(buf)
+	if err == nil {
+		t.Fatal("sender should not receive own message")
+	}
+}
+
+func TestRemoveStaleClients_OnReg(t *testing.T) {
+	resetIPCounts()
+	relayConn, connA, addrA := setupRelayConns(t)
+
+	connB, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen B: %v", err)
+	}
+	defer connB.Close()
+	addrB := connB.LocalAddr().(*net.UDPAddr)
+
+	connC, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen C: %v", err)
+	}
+	defer connC.Close()
+	addrC := connC.LocalAddr().(*net.UDPAddr)
+
+	room := uniqueRoom("stale-reg")
+	registerClient(t, relayConn, connA, addrA, room)
+	registerClient(t, relayConn, connB, addrB, room)
+
+	shard := shardFor(room)
+	shard.mu.RLock()
+	entry := shard.rooms[room]
+	shard.mu.RUnlock()
+	entry.mu.Lock()
+	entry.udpClients[addrA.String()].lastSeen = time.Now().Add(-2 * regTTL)
+	entry.mu.Unlock()
+
+	registerClient(t, relayConn, connC, addrC, room)
+
+	HandlePacket(relayConn, []byte("MSG "+room+" spake2 deadbeef\n"), addrB)
+
+	resp := readUDPLine(t, connC, 500*time.Millisecond)
+	if resp != "MSGD spake2 deadbeef" {
+		t.Fatalf("client C expected MSGD, got %q", resp)
+	}
+
+	connA.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	buf := make([]byte, 1500)
+	_, err = connA.Read(buf)
+	if err == nil {
+		t.Fatal("evicted client A should not receive messages")
+	}
+}
+
+func TestReReg_DoesNotBumpRoomTTL(t *testing.T) {
+	resetIPCounts()
+	relayConn, clientConn, clientAddr := setupRelayConns(t)
+	room := uniqueRoom("rereg-ttl")
+
+	registerClient(t, relayConn, clientConn, clientAddr, room)
+
+	shard := shardFor(room)
+	shard.mu.RLock()
+	entry := shard.rooms[room]
+	shard.mu.RUnlock()
+	entry.mu.Lock()
+	origT := entry.t
+	entry.mu.Unlock()
+
+	time.Sleep(10 * time.Millisecond)
+	HandlePacket(relayConn, []byte("REG "+room+"\n"), clientAddr)
+	readUDPLine(t, clientConn, 500*time.Millisecond)
+
+	entry.mu.Lock()
+	newT := entry.t
+	entry.mu.Unlock()
+
+	if newT.After(origT.Add(5 * time.Millisecond)) {
+		t.Fatalf("entry.t was bumped: orig=%v new=%v", origT, newT)
+	}
+}
+
 func TestHandleMsg_InvalidFormat(t *testing.T) {
 	relayConn, clientConn, clientAddr := setupRelayConns(t)
 	room := uniqueRoom("msg-invalid")
 
-	HandlePacket(relayConn, []byte("REG "+room+"\n"), clientAddr)
-	readUDPLine(t, clientConn, 500*time.Millisecond)
+	registerClient(t, relayConn, clientConn, clientAddr, room)
 
 	HandlePacket(relayConn, []byte("MSG "+room+"\n"), clientAddr)
 	clientConn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
@@ -221,8 +356,7 @@ func TestHandleMsg_InvalidHex(t *testing.T) {
 	relayConn, clientConn, clientAddr := setupRelayConns(t)
 	room := uniqueRoom("msg-hex")
 
-	HandlePacket(relayConn, []byte("REG "+room+"\n"), clientAddr)
-	readUDPLine(t, clientConn, 500*time.Millisecond)
+	registerClient(t, relayConn, clientConn, clientAddr, room)
 
 	HandlePacket(relayConn, []byte("MSG "+room+" spake2 zzzz\n"), clientAddr)
 	clientConn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
@@ -244,10 +378,8 @@ func TestHandleMsg_RateLimiting(t *testing.T) {
 
 	room := uniqueRoom("msg-rate")
 
-	HandlePacket(relayConn, []byte("REG "+room+"\n"), client1Addr)
-	readUDPLine(t, client1Conn, 500*time.Millisecond)
-	HandlePacket(relayConn, []byte("REG "+room+"\n"), client2Addr)
-	readUDPLine(t, client2Conn, 500*time.Millisecond)
+	registerClient(t, relayConn, client1Conn, client1Addr, room)
+	registerClient(t, relayConn, client2Conn, client2Addr, room)
 
 	for i := 0; i < maxMsgRate; i++ {
 		HandlePacket(relayConn, []byte(fmt.Sprintf("MSG %s spake2 %02x\n", room, i)), client1Addr)
@@ -295,6 +427,56 @@ func TestHandleMsg_UnknownSender(t *testing.T) {
 	_, err = client2Conn.Read(buf)
 	if err == nil {
 		t.Fatal("expected no response for unregistered sender")
+	}
+}
+
+func TestHandleMsg_UnknownPhase(t *testing.T) {
+	relayConn, client1Conn, client1Addr := setupRelayConns(t)
+	client2Conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen client2: %v", err)
+	}
+	defer client2Conn.Close()
+	client2Addr := client2Conn.LocalAddr().(*net.UDPAddr)
+
+	room := uniqueRoom("msg-unknown-phase")
+
+	registerClient(t, relayConn, client1Conn, client1Addr, room)
+	registerClient(t, relayConn, client2Conn, client2Addr, room)
+
+	HandlePacket(relayConn, []byte("MSG "+room+" badphase aabb\n"), client1Addr)
+	client2Conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	buf := make([]byte, 1500)
+	_, err = client2Conn.Read(buf)
+	if err == nil {
+		t.Fatal("expected no MSGD for unknown phase")
+	}
+}
+
+func TestHandleMsg_KnownPhasesForwarded(t *testing.T) {
+	relayConn, client1Conn, client1Addr := setupRelayConns(t)
+	client2Conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen client2: %v", err)
+	}
+	defer client2Conn.Close()
+	client2Addr := client2Conn.LocalAddr().(*net.UDPAddr)
+
+	room := uniqueRoom("msg-known-phase")
+
+	registerClient(t, relayConn, client1Conn, client1Addr, room)
+	registerClient(t, relayConn, client2Conn, client2Addr, room)
+
+	HandlePacket(relayConn, []byte("MSG "+room+" spake2 aabb\n"), client1Addr)
+	msg := readUDPLine(t, client2Conn, 500*time.Millisecond)
+	if !strings.HasPrefix(msg, "MSGD spake2 ") {
+		t.Fatalf("expected MSGD spake2 prefix, got %q", msg)
+	}
+
+	HandlePacket(relayConn, []byte("MSG "+room+" confirm aabb\n"), client1Addr)
+	msg = readUDPLine(t, client2Conn, 500*time.Millisecond)
+	if !strings.HasPrefix(msg, "MSGD confirm ") {
+		t.Fatalf("expected MSGD confirm prefix, got %q", msg)
 	}
 }
 
@@ -466,22 +648,22 @@ func TestWriteRelay(t *testing.T) {
 	}
 }
 
-func TestHandleReg_ClientLimit(t *testing.T) {
+func TestHandleReg_HardCap(t *testing.T) {
 	relayConn, _, _ := setupRelayConns(t)
-	room := uniqueRoom("reg-limit")
+	room := uniqueRoom("reg-hard-cap")
 
-	conns := make([]*net.UDPConn, maxClientsPerRoom)
-	addrs := make([]*net.UDPAddr, maxClientsPerRoom)
-	for i := 0; i < maxClientsPerRoom; i++ {
+	oldCap := maxClientsHard
+	maxClientsHard = 3
+	defer func() { maxClientsHard = oldCap }()
+
+	for i := 0; i < maxClientsHard; i++ {
 		c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 		if err != nil {
 			t.Fatalf("listen client %d: %v", i, err)
 		}
 		defer c.Close()
-		conns[i] = c
-		addrs[i] = c.LocalAddr().(*net.UDPAddr)
-		HandlePacket(relayConn, []byte("REG "+room+"\n"), addrs[i])
-		readUDPLine(t, c, 500*time.Millisecond)
+		addr := c.LocalAddr().(*net.UDPAddr)
+		registerClient(t, relayConn, c, addr, room)
 	}
 
 	extraConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
@@ -496,11 +678,12 @@ func TestHandleReg_ClientLimit(t *testing.T) {
 	buf := make([]byte, 1500)
 	_, err = extraConn.Read(buf)
 	if err == nil {
-		t.Fatal("expected no REGD for room at capacity")
+		t.Fatal("expected no REGD when hard cap reached")
 	}
 }
 
 func TestHandleReg_NoQueuedMessagesOnJoin(t *testing.T) {
+	resetIPCounts()
 	relayConn, client1Conn, client1Addr := setupRelayConns(t)
 	client2Conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
@@ -657,11 +840,7 @@ func TestHandleReg_PerIPRoomLimit(t *testing.T) {
 		clientAddr := clientConn.LocalAddr().(*net.UDPAddr)
 
 		room := uniqueRoom(fmt.Sprintf("ip-limit-%d", i))
-		HandlePacket(relayConn, []byte("REG "+room+"\n"), clientAddr)
-		_, ok := readUDPLineOrNone(t, clientConn, 500*time.Millisecond)
-		if !ok {
-			t.Fatalf("expected REGD for room %d", i)
-		}
+		registerClient(t, relayConn, clientConn, clientAddr, room)
 	}
 
 	extraConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})

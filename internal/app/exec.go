@@ -58,6 +58,7 @@ func RunExecCommand(ctx context.Context, conn *quic.Conn, command string) error 
 	defer execCancel()
 
 	cmd := exec.CommandContext(execCtx, args[0], args[1:]...)
+	cmd.SysProcAttr = childSysProcAttr()
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -85,7 +86,11 @@ func RunExecCommand(ctx context.Context, conn *quic.Conn, command string) error 
 	select {
 	case <-copyDone:
 	case <-execCtx.Done():
+		stream.CancelRead(0)
+		<-copyDone
 	case <-time.After(execDrainTimeoutVal):
+		stream.CancelRead(0)
+		<-copyDone
 	}
 	return cmdErr
 }

@@ -14,6 +14,7 @@ const (
 	maxTunnelRequests   = 100
 	streamHeaderTimeout = 15 * time.Second
 	streamConfigTimeout = 30 * time.Second
+	streamIdleTimeout   = 5 * time.Minute
 )
 
 // TunnelRequest represents a single port-forwarding tunnel specification.
@@ -42,8 +43,8 @@ func readRequestsFromStream(scanner *bufio.Scanner) ([]TunnelRequest, error) {
 		}
 		reqs = append(reqs, TunnelRequest{
 			Type:       parts[0],
-			ListenAddr: parts[1],
-			TargetAddr: parts[2],
+			ListenAddr: parseAddr(parts[1]),
+			TargetAddr: parseAddr(parts[2]),
 		})
 	}
 	if err := scanner.Err(); err != nil {
@@ -88,8 +89,19 @@ func stripBrackets(s string) string {
 	return s
 }
 
-// ParseTunnelRequest parses a tunnel spec string into a TunnelRequest.
-// Accepts the forms [addr:]port:host:port.
+// parseAddr strips control characters and trims whitespace from a peer-supplied
+// address string. Peer-supplied addresses are logged and used as dial/listen
+// targets; control characters could enable log-injection attacks on terminals.
+func parseAddr(s string) string {
+	var b []byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 32 && c < 127 {
+			b = append(b, c)
+		}
+	}
+	return string(b)
+}
 func ParseTunnelRequest(spec, typ string) (*TunnelRequest, error) {
 	parts := SplitTunnelRequest(spec)
 

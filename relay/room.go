@@ -18,24 +18,30 @@ const (
 	maxDatagramLen = 1400
 
 	defaultMaxRooms           = 10000
-	defaultMaxClientsPerRoom  = 2
-	defaultMaxRoomsPerIP      = 100
+	defaultMaxRoomsPerIP      = 10
 	defaultMaxMsgRate         = 10
 	defaultRateWindow         = 1 * time.Second
 	defaultRegCleanupInterval = 1 * time.Minute
-	defaultRegTTL             = 5 * time.Minute
+	defaultRegTTL             = 1 * time.Minute
 	defaultRelayWorkers       = 4
+	defaultMaxClientsHard     = 20
+
+	// maxRegShardEntries is a hard cap on rate-limit map entries per
+	// shard. Under a source-IP flood, entries accumulate fast; this cap
+	// prevents unbounded memory growth.
+	maxRegShardEntries     = 100_000
+	rateMapCleanupInterval = 5 * time.Second
 )
 
 var (
 	maxRooms           int           = defaultMaxRooms
-	maxClientsPerRoom  int           = defaultMaxClientsPerRoom
 	maxRoomsPerIP      int           = defaultMaxRoomsPerIP
 	maxMsgRate         int           = defaultMaxMsgRate
 	rateWindow         time.Duration = defaultRateWindow
 	regCleanupInterval time.Duration = defaultRegCleanupInterval
 	regTTL             time.Duration = defaultRegTTL
 	relayWorkers       int           = defaultRelayWorkers
+	maxClientsHard     int           = defaultMaxClientsHard
 )
 
 type rateLimiter struct {
@@ -68,7 +74,17 @@ type udpClient struct {
 type roomEntry struct {
 	mu         sync.Mutex
 	udpClients map[string]*udpClient
+	pending    map[string]*pendingReg // cookie challenge, keyed by srcStr
 	t          time.Time
+}
+
+// pendingReg holds a return-routability cookie for a client that sent REG
+// but has not yet completed the cookie handshake. Prevents source-address
+// spoofing from installing victim addresses into a room.
+type pendingReg struct {
+	cookie       []byte
+	createdAt    time.Time
+	resolvedAddr *net.UDPAddr
 }
 
 type roomShard struct {
@@ -132,8 +148,8 @@ func (l *ipRateLimiter) cleanupStale(maxAge time.Duration) {
 
 func init() {
 	maxRooms = util.EnvInt("QVOLE_RELAY_MAX_ROOMS", defaultMaxRooms)
-	maxClientsPerRoom = util.EnvInt("QVOLE_RELAY_MAX_CLIENTS", defaultMaxClientsPerRoom)
 	maxRoomsPerIP = util.EnvInt("QVOLE_RELAY_MAX_ROOMS_PER_IP", defaultMaxRoomsPerIP)
+	maxClientsHard = util.EnvInt("QVOLE_RELAY_MAX_CLIENTS_HARD", defaultMaxClientsHard)
 	maxMsgRate = util.EnvInt("QVOLE_RELAY_MSG_RATE", defaultMaxMsgRate)
 	rateWindow = util.EnvDuration("QVOLE_RELAY_RATE_WINDOW_MS", defaultRateWindow)
 	regCleanupInterval = util.EnvDuration("QVOLE_RELAY_CLEANUP_INTERVAL_MS", defaultRegCleanupInterval)
@@ -166,6 +182,13 @@ func ipKey(src string) string {
 	host, _, err := net.SplitHostPort(src)
 	if err != nil {
 		return src
+	}
+	// Canonicalize the address so textual variants of the same IP
+	// (e.g., "2001:db8::1" vs "2001:db8:0:0:0:0:0:1" vs "::ffff:1.2.3.4"
+	// vs "1.2.3.4") collapse to a single key. Otherwise per-IP limits can
+	// be bypassed trivially from an IPv6 /64.
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String()
 	}
 	return host
 }
@@ -250,7 +273,16 @@ func isRegRateLimited(src string) bool {
 	defer sh.mu.Unlock()
 	now := time.Now()
 	reset, ok := sh.times[src]
-	if !ok || now.Sub(reset) > rateWindow {
+	if !ok {
+		if len(sh.times) >= maxRegShardEntries {
+			// Map is at the hard cap (flood). Rate-limit new entries.
+			return true
+		}
+		sh.sent[src] = 1
+		sh.times[src] = now
+		return false
+	}
+	if now.Sub(reset) > rateWindow {
 		sh.sent[src] = 1
 		sh.times[src] = now
 		return false
@@ -285,6 +317,16 @@ func resetIPCounts() {
 	}
 }
 
+func resetRooms() {
+	for i := range shards {
+		sh := &shards[i]
+		sh.mu.Lock()
+		sh.rooms = make(map[string]*roomEntry)
+		sh.mu.Unlock()
+	}
+	totalRoomCount.Store(0)
+}
+
 func countIPRooms(ip string) int {
 	sh := ipCountShardFor(ip)
 	sh.mu.Lock()
@@ -309,6 +351,16 @@ func (entry *roomEntry) removeStaleClients(room string, now time.Time) {
 			delete(entry.udpClients, addr)
 		}
 	}
+	// Evict expired pending registrations.
+	for addr, pend := range entry.pending {
+		if now.Sub(pend.createdAt) > pendingRegTTL {
+			delete(entry.pending, addr)
+		}
+	}
+	// Drop the pending map entirely if empty.
+	if len(entry.pending) == 0 {
+		entry.pending = nil
+	}
 }
 
 func evictStaleRooms(shard *roomShard) int {
@@ -330,13 +382,15 @@ func evictStaleRooms(shard *roomShard) int {
 }
 
 func cleanupRegs(ctx context.Context) {
-	t := time.NewTicker(regCleanupInterval)
-	defer t.Stop()
+	rateTick := time.NewTicker(rateMapCleanupInterval)
+	defer rateTick.Stop()
+	roomTick := time.NewTicker(regCleanupInterval)
+	defer roomTick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-rateTick.C:
 			for i := range regShards {
 				sh := &regShards[i]
 				sh.mu.Lock()
@@ -349,6 +403,7 @@ func cleanupRegs(ctx context.Context) {
 				sh.mu.Unlock()
 			}
 			dropLogLimiter.cleanupStale(dropLogInterval * 2)
+		case <-roomTick.C:
 			for i := range shards {
 				shard := &shards[i]
 				shard.mu.Lock()

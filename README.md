@@ -509,11 +509,11 @@ WantedBy=multi-user.target
 | `QVOLE_MAX_STREAMS` | 100 | Max concurrent QUIC streams |
 | `QVOLE_FORWARD_MAX_STREAMS` | 200 | Max forwarded tunnel streams |
 | `QVOLE_PUNCH_TIMEOUT_MS` | 10000 | UDP hole punch timeout |
-| `QVOLE_EXCHANGE_DEADLINE_MS` | 300000 | SPAKE2 exchange deadline |
+| `QVOLE_EXCHANGE_DEADLINE_MS` | 90000 | SPAKE2 exchange deadline |
 | `QVOLE_SPAKE2_RESEND_MS` | 2000 | SPAKE2 message resend interval |
 | `QVOLE_CONFIRM_RESEND_MS` | 2000 | Confirm message resend interval |
 | `QVOLE_EXCHANGE_READ_DEADLINE_MS` | 1000 | Relay read poll interval |
-| `QVOLE_REG_INTERVAL_MS` | 60000 | Relay registration interval |
+| `QVOLE_REG_INTERVAL_MS` | 30000 | Relay registration interval |
 | `QVOLE_DIAL_TIMEOUT_MS` | 10000 | Tunnel TCP dial timeout |
 | `QVOLE_EXEC_DRAIN_TIMEOUT_MS` | 5000 | Exec drain timeout after command exit |
 | `QVOLE_INITIAL_STREAM_WINDOW` | 1048576 | QUIC stream receive window |
@@ -524,15 +524,16 @@ WantedBy=multi-user.target
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `QVOLE_RELAY_MAX_ROOMS` | 10000 | Maximum concurrent rooms |
-| `QVOLE_RELAY_MAX_CLIENTS` | 2 | Maximum clients per room |
-| `QVOLE_RELAY_MAX_ROOMS_PER_IP` | 100 | Maximum rooms per IP address |
+| `QVOLE_RELAY_MAX_ROOMS_PER_IP` | 10 | Maximum rooms per IP address |
+| `QVOLE_RELAY_MAX_CLIENTS_HARD` | 20 | Hard cap on clients per room |
 | `QVOLE_RELAY_MSG_RATE` | 10 | Maximum messages per rate window per client |
 | `QVOLE_RELAY_RATE_WINDOW_MS` | 1000 | Rate window duration for message limiting |
-| `QVOLE_RELAY_TTL_MS` | 300000 | Registration TTL before client expires |
+| `QVOLE_RELAY_TTL_MS` | 60000 | Registration TTL (1 min) before client expires |
 | `QVOLE_RELAY_CLEANUP_INTERVAL_MS` | 60000 | Cleanup interval for expired registrations |
 | `QVOLE_RELAY_WORKERS` | 4 | Number of worker goroutines |
 | `QVOLE_RELAY_PKT_CHAN_BUF` | 256 | Packet channel buffer size |
 | `QVOLE_RELAY_WRITE_DEADLINE_MS` | 500 | UDP write deadline |
+| `QVOLE_RELAY_WRITE_POOL` | 256 | Write pool size for relay outbound writes |
 | `QVOLE_RELAY_STATS_INTERVAL_MS` | 300000 | Stats logging interval |
 
 ### Privacy & Terms

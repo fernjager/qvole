@@ -12,8 +12,8 @@ handling by design.
 
 | Data | Why it's seen | Retention |
 |---|---|---|
-| **Your IP address + UDP port** | Inherent to UDP networking. Needed to route packets back to you | In-memory only, auto-evicted 5 min after last activity |
-| **Room name** (8-hex-char hash prefix of your connection code) | Registers you in a rendezvous room so your peer can find you | In-memory only, auto-evicted 5 min after last activity |
+| **Your IP address + UDP port** | Inherent to UDP networking. Needed to route packets back to you | In-memory only, auto-evicted 1 min after last activity |
+| **Room name** (8-hex-char hash prefix of your connection code) | Registers you in a rendezvous room so your peer can find you | In-memory only, auto-evicted 1 min after last activity |
 | **Message timing and sizes** | SPAKE2 handshake packets (REG, MSG, REGD, MSGD) transit the relay | Not retained. Relayed immediately, no message buffering |
 
 ### What the relay never sees
@@ -41,8 +41,8 @@ Logs are not persisted to disk and are not shared with third parties.
 The relay is **fully in-memory and stateless**:
 
 - No database, no log files, no disk writes
-- Room state and client entries expire automatically 5 minutes after inactivity
-- Rate-limiting counters are cleaned every 60 seconds
+- Room state and client entries expire automatically 1 minute after inactivity
+- Rate-limiting counters are cleaned every 5 seconds
 - Aggregate counters (REGs, MSGs, drops) accumulate in-memory for the lifetime of
   the relay process only
 

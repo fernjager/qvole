@@ -185,6 +185,7 @@ func registerAndExchange(ctx context.Context, udpConn *net.UDPConn, room, code s
 	lastSpake2Sent := time.Time{}
 	lastRegSent := time.Time{}
 	receivedREGD := false
+	pendingCookie := "" // hex cookie from relay REGD challenge
 
 	for {
 		select {
@@ -197,7 +198,11 @@ func registerAndExchange(ctx context.Context, udpConn *net.UDPConn, room, code s
 		}
 
 		if time.Since(lastRegSent) > regInterval {
-			udpConn.Write([]byte("REG " + room + "\n"))
+			msg := "REG " + room + "\n"
+			if pendingCookie != "" {
+				msg = "REG " + room + " " + pendingCookie + "\n"
+			}
+			udpConn.Write([]byte(msg))
 			lastRegSent = time.Now()
 		}
 
@@ -227,15 +232,27 @@ func registerAndExchange(ctx context.Context, udpConn *net.UDPConn, room, code s
 
 		if bytes.HasPrefix(line, []byte("REGD ")) {
 			rest := line[len("REGD "):]
-			relayRoom, relayExtAddr, found := bytes.Cut(rest, []byte(" "))
-			if string(relayRoom) == room {
+			relayRoom, relayPayload, found := bytes.Cut(rest, []byte(" "))
+			if string(relayRoom) != room || !found {
+				continue
+			}
+			payload := string(bytes.TrimSpace(relayPayload))
+			// "REGD <room> OK <addr>" — confirmed registration.
+			if strings.HasPrefix(payload, "OK ") {
 				receivedREGD = true
-				if found && len(relayExtAddr) > 0 {
-					extAddr := string(bytes.TrimSpace(relayExtAddr))
-					if extAddr != "" {
-						myAddr = extAddr
-						util.LogRelay.PrintfSuccess("Connected! Ext. address: %s", util.Bold(myAddr))
-					}
+				extAddr := strings.TrimSpace(payload[3:])
+				if extAddr != "" {
+					myAddr = extAddr
+					util.LogRelay.PrintfSuccess("Connected! Ext. address: %s", util.Bold(myAddr))
+				}
+				continue
+			}
+			// "REGD <room> <cookie>" — cookie challenge (32 hex chars).
+			if len(payload) == 32 {
+				_, hexErr := hex.DecodeString(payload)
+				if hexErr == nil {
+					pendingCookie = payload
+					lastRegSent = time.Time{} // send cookie-bearing REG immediately
 				}
 			}
 		}

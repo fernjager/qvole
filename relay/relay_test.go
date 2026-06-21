@@ -166,12 +166,49 @@ func TestTotalRooms_Zero(t *testing.T) {
 	}
 }
 
+func TestIPKey_CanonicalizesIPv6(t *testing.T) {
+	// IPv6 literals in host:port form must be bracketed.
+	variants := []string{
+		"[2001:db8::1]:1234",
+		"[2001:db8:0:0:0:0:0:1]:1234",
+		"[2001:0db8:0000:0000:0000:0000:0000:0001]:1234",
+	}
+	keys := make([]string, len(variants))
+	for i, v := range variants {
+		keys[i] = ipKey(v)
+	}
+	for i := 1; i < len(keys); i++ {
+		if keys[i] != keys[0] {
+			t.Errorf("ipv6 variant %q produced different key %q (want %q)", variants[i], keys[i], keys[0])
+		}
+	}
+}
+
+func TestIPKey_CanonicalizesIPv4MappedIPv6(t *testing.T) {
+	v6 := ipKey("[::ffff:1.2.3.4]:5678")
+	v4 := ipKey("1.2.3.4:5678")
+	if v6 != v4 {
+		t.Errorf("ipv4-mapped ipv6 not collapsed: v6=%q v4=%q", v6, v4)
+	}
+}
+
+func TestIPKey_PassesHostname(t *testing.T) {
+	if got := ipKey("example.com:80"); got != "example.com" {
+		t.Errorf("hostname changed: got %q want example.com", got)
+	}
+}
+
+func TestIPKey_FallbackOnParseError(t *testing.T) {
+	// No port: SplitHostPort errors, should return input unchanged.
+	in := "not-a-valid-hostport"
+	if got := ipKey(in); got != in {
+		t.Errorf("expected fallback to input, got %q", got)
+	}
+}
+
 func TestRelayConstants(t *testing.T) {
 	if maxRooms != 10000 {
 		t.Errorf("maxRooms = %d, want 10000", maxRooms)
-	}
-	if maxClientsPerRoom != 2 {
-		t.Errorf("maxClientsPerRoom = %d, want 2", maxClientsPerRoom)
 	}
 	if maxMsgRate != 10 {
 		t.Errorf("maxMsgRate = %d, want 10", maxMsgRate)
@@ -179,17 +216,20 @@ func TestRelayConstants(t *testing.T) {
 	if maxDatagramLen != 1400 {
 		t.Errorf("maxDatagramLen = %d, want 1400", maxDatagramLen)
 	}
-	if regTTL != 5*time.Minute {
-		t.Errorf("regTTL = %v, want 5m", regTTL)
+	if regTTL != 1*time.Minute {
+		t.Errorf("regTTL = %v, want 1m", regTTL)
 	}
 	if regCleanupInterval != 1*time.Minute {
 		t.Errorf("regCleanupInterval = %v, want 1m", regCleanupInterval)
 	}
-	if maxRoomsPerIP != 100 {
-		t.Errorf("maxRoomsPerIP = %d, want 100", maxRoomsPerIP)
+	if maxRoomsPerIP != 10 {
+		t.Errorf("maxRoomsPerIP = %d, want 10", maxRoomsPerIP)
 	}
 	if numRegShards != 16 {
 		t.Errorf("numRegShards = %d, want 16", numRegShards)
+	}
+	if maxClientsHard != 20 {
+		t.Errorf("maxClientsHard = %d, want 20", maxClientsHard)
 	}
 }
 
@@ -262,11 +302,11 @@ func TestIsRegRateLimited_FirstCall(t *testing.T) {
 }
 
 func TestExchangeConstants(t *testing.T) {
-	if engine.ExchangeDeadline != 5*time.Minute {
-		t.Errorf("exchangeDeadline = %v, want 5m", engine.ExchangeDeadline)
+	if engine.ExchangeDeadline != 90*time.Second {
+		t.Errorf("exchangeDeadline = %v, want 90s", engine.ExchangeDeadline)
 	}
-	if engine.RegInterval != 60*time.Second {
-		t.Errorf("regInterval = %v, want 60s", engine.RegInterval)
+	if engine.RegInterval != 30*time.Second {
+		t.Errorf("regInterval = %v, want 30s", engine.RegInterval)
 	}
 }
 
@@ -565,10 +605,8 @@ func TestHandlePacket_ConcurrentRegAndMsg(t *testing.T) {
 
 	room := uniqueRoom("concurrent-reg-msg")
 
-	HandlePacket(relayConn, []byte("REG "+room+"\n"), client1Addr)
-	readUDPLine(t, client1Conn, 500*time.Millisecond)
-	HandlePacket(relayConn, []byte("REG "+room+"\n"), client2Addr)
-	readUDPLine(t, client2Conn, 500*time.Millisecond)
+	registerClient(t, relayConn, client1Conn, client1Addr, room)
+	registerClient(t, relayConn, client2Conn, client2Addr, room)
 
 	var wg sync.WaitGroup
 	wg.Add(2)

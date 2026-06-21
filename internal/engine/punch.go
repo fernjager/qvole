@@ -59,7 +59,11 @@ func startHolePunching(ctx context.Context, udpConn *net.UDPConn, peerAddr *net.
 	go func() {
 		defer close(successCh)
 		recvCh := make(chan *net.UDPAddr, 1)
-		go listenForPunch(ctx, udpConn, peerAddr, recvCh)
+		punchDone := make(chan struct{})
+		go func() {
+			defer close(punchDone)
+			listenForPunch(ctx, udpConn, peerAddr, recvCh)
+		}()
 
 		payloads := make([][]byte, len(punchPayloadSizes))
 		for i, sz := range punchPayloadSizes {
@@ -78,12 +82,14 @@ func startHolePunching(ctx context.Context, udpConn *net.UDPConn, peerAddr *net.
 		for {
 			select {
 			case <-ctx.Done():
+				<-punchDone
 				return
 			case addr := <-recvCh:
 				select {
 				case successCh <- addr:
 				default:
 				}
+				<-punchDone
 				return
 			case <-ticker.C:
 				payload := payloads[attempt%len(payloads)]

@@ -611,8 +611,11 @@ func TestSPAKE2_Destroy_ZerosFields(t *testing.T) {
 	if s.pwScalar.Sign() != 0 {
 		t.Error("pwScalar not zeroed")
 	}
-	if s.scalar.Sign() != 0 {
-		t.Error("scalar not zeroed")
+	if s.scalarM.Sign() != 0 {
+		t.Error("scalarM not zeroed")
+	}
+	if s.scalarN.Sign() != 0 {
+		t.Error("scalarN not zeroed")
 	}
 	if s.blindedXM.Sign() != 0 {
 		t.Error("blindedXM not zeroed")
@@ -811,5 +814,83 @@ func TestSPAKE2_Confirm_BitDiffInNonce(t *testing.T) {
 
 	if string(c1) == string(c2) {
 		t.Fatal("different nonces should produce different confirms")
+	}
+}
+
+// TestSPAKE2_IndependentScalars asserts that NewState does not reuse a single
+// ephemeral scalar for both blinded points. If a single scalar r were reused,
+// an observer could subtract the two captured blinded points to cancel the
+// r*G term and recover pw*(M-N), enabling offline dictionary attacks.
+func TestSPAKE2_IndependentScalars(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		s, err := NewState("test-password")
+		if err != nil {
+			t.Fatalf("state %d: %v", i, err)
+		}
+		if s.scalarM.Cmp(s.scalarN) == 0 {
+			t.Fatalf("iteration %d: scalarM == scalarN (scalars not independent)", i)
+		}
+	}
+}
+
+// TestSPAKE2_NoOfflineOracle is the key regression test for the critical fix.
+// If the implementation correctly uses independent ephemeral scalars, then
+// blindedM - blindedN is NOT a deterministic function of the password, and
+// computing pw_candidate*(M-N) for wrong candidates should not match the
+// captured delta. We construct the test to fail loudly if a future refactor
+// regresses to a single shared scalar.
+//
+// Note: this test is necessarily probabilistic. The probability that a wrong
+// candidate happens to match by accident is ~1/2^256; running 50 candidates
+// gives a false-pass probability indistinguishable from zero.
+func TestSPAKE2_NoOfflineOracle(t *testing.T) {
+	const correctPassword = "correct-horse-battery-staple"
+	wrongCandidates := []string{
+		"wrong-password-1",
+		"wrong-password-2",
+		"password",
+		"12345678",
+		"",
+		"correct-horse-battery-stapl",   // 1-char short
+		"Correct-Horse-Battery-Staple",  // case swap
+		"correct-horse-battery-staple!", // extra char
+	}
+
+	state, err := NewState(correctPassword)
+	if err != nil {
+		t.Fatalf("state: %v", err)
+	}
+
+	bmX, bmY := elliptic.Unmarshal(Curve, state.BlindedBytesM())
+	bnX, bnY := elliptic.Unmarshal(Curve, state.BlindedBytesN())
+	if bmX == nil || bnX == nil {
+		t.Fatalf("could not unmarshal blinded points")
+	}
+
+	// captured delta = blindedM - blindedN
+	negBnY := new(big.Int).Sub(Curve.Params().P, bnY)
+	deltaX, deltaY := Curve.Add(bmX, bmY, bnX, negBnY)
+
+	// Public constant T = M - N (computed once, like an attacker would)
+	negNY := new(big.Int).Sub(Curve.Params().P, Ny)
+	tX, tY := Curve.Add(Mx, My, Nx, negNY)
+
+	for _, candidate := range wrongCandidates {
+		pwScalar := PasswordToScalar(candidate)
+		candX, candY := Curve.ScalarMult(tX, tY, scalarBytes32(pwScalar))
+		if candX.Cmp(deltaX) == 0 && candY.Cmp(deltaY) == 0 {
+			t.Fatalf("offline oracle matched for wrong candidate %q: "+
+				"scalar reuse regression?", candidate)
+		}
+	}
+
+	// With independent scalars, blindedM - blindedN = (rM - rN)*G + pw*(M-N),
+	// so even the correct password does NOT match delta (unless rM == rN,
+	// which has probability ~1/2^256). A match would indicate a regression
+	// to the old single-scalar behavior.
+	correctScalar := PasswordToScalar(correctPassword)
+	correctX, correctY := Curve.ScalarMult(tX, tY, scalarBytes32(correctScalar))
+	if correctX.Cmp(deltaX) == 0 && correctY.Cmp(deltaY) == 0 {
+		t.Fatal("correct password matched delta — single-scalar regression?")
 	}
 }

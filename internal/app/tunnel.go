@@ -116,10 +116,13 @@ func ExchangeTunnelConfig(ctx context.Context, conn *quic.Conn, myReqs []TunnelR
 		}
 		defer stream.Close()
 
+		stream.SetWriteDeadline(time.Now().Add(streamConfigTimeout))
 		if err := writeTunnelConfig(stream, allowTunnel, myReqs); err != nil {
 			return false, nil, err
 		}
+		stream.SetWriteDeadline(time.Time{})
 
+		stream.SetReadDeadline(time.Now().Add(streamConfigTimeout))
 		scanner := newScanner(stream)
 		peerAccept, err = readAcceptLine(scanner)
 		if err != nil {
@@ -129,6 +132,7 @@ func ExchangeTunnelConfig(ctx context.Context, conn *quic.Conn, myReqs []TunnelR
 		if err != nil {
 			return false, nil, err
 		}
+		stream.SetReadDeadline(time.Time{})
 
 		reqs = append(myReqs, peerReqs...)
 		util.LogTunnel.Printf("Received %d tunnel request(s) from peer (accept=%v)", len(peerReqs), peerAccept)
@@ -155,9 +159,11 @@ func ExchangeTunnelConfig(ctx context.Context, conn *quic.Conn, myReqs []TunnelR
 	reqs = peerReqs
 	util.LogTunnel.Printf("Received %d tunnel request(s) from peer", len(reqs))
 
+	stream.SetWriteDeadline(time.Now().Add(streamConfigTimeout))
 	if err := writeTunnelConfig(stream, allowTunnel, myReqs); err != nil {
 		return false, nil, err
 	}
+	stream.SetWriteDeadline(time.Time{})
 
 	reqs = append(reqs, myReqs...)
 	util.LogTunnel.PrintfSuccess("Sent %d tunnel request(s)", len(myReqs))
@@ -286,10 +292,27 @@ func RunTCPListeners(ctx context.Context, conn *quic.Conn, reqs []TunnelRequest,
 	}
 }
 
+var (
+	outboundGuard = make(chan struct{}, engine.GetForwardMaxStreams())
+)
+
 // HandleTunnelTCP opens a QUIC stream for a local TCP connection, writing a 2-byte
 // header with the tunnel spec index before bridging data.
 func HandleTunnelTCP(ctx context.Context, conn *quic.Conn, tcpConn net.Conn, specIdx int) {
 	defer tcpConn.Close()
+
+	if specIdx > 65535 {
+		util.LogTunnel.PrintfWarn("Spec index %d exceeds uint16 max", specIdx)
+		return
+	}
+
+	select {
+	case outboundGuard <- struct{}{}:
+	default:
+		util.LogTunnel.PrintfWarn("Outbound stream limit reached, rejecting tunnel %d", specIdx)
+		return
+	}
+	defer func() { <-outboundGuard }()
 
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
@@ -305,6 +328,7 @@ func HandleTunnelTCP(ctx context.Context, conn *quic.Conn, tcpConn net.Conn, spe
 		return
 	}
 
+	tcpConn.SetReadDeadline(time.Now().Add(streamIdleTimeout))
 	bidirectionalCopy(tcpConn, stream)
 	stream.Close()
 }
@@ -354,5 +378,9 @@ func HandleTunnelStream(ctx context.Context, stream *quic.Stream, reqs []TunnelR
 
 	util.LogTunnel.PrintfSuccess("Tunnel %d active: ↔ %s", idx, util.Bold(req.TargetAddr))
 
+	// Set an idle deadline on the QUIC stream before the long-lived copy
+	// so a peer that goes silent cannot hold the connection open forever.
+	stream.SetReadDeadline(time.Now().Add(streamIdleTimeout))
+	tcpConn.SetReadDeadline(time.Now().Add(streamIdleTimeout))
 	bidirectionalCopy(tcpConn, stream)
 }

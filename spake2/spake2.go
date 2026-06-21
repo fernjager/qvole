@@ -39,11 +39,13 @@ var (
 	kdfIterations int = 600000
 )
 
+const minKdfIterations = 100_000
+
 func init() {
 	Mx, My = HashToCurve(Curve, []byte("qvole-spake2-M-v1"))
 	Nx, Ny = HashToCurve(Curve, []byte("qvole-spake2-N-v1"))
 	if v := os.Getenv("QVOLE_KDF_ITERATIONS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+		if n, err := strconv.Atoi(v); err == nil && n >= minKdfIterations {
 			kdfIterations = n
 		}
 	}
@@ -113,63 +115,103 @@ func ComputeWeierstrassY(curve elliptic.Curve, x *big.Int) *big.Int {
 
 // PasswordToScalar maps a password string to a scalar in [1, N-1] via
 // PBKDF2-HMAC-SHA256 with domain separation and tunable iterations. Never
-// returns zero. The iteration count is configurable via QVOLE_KDF_ITERATIONS
-// (default 600000). Both peers must use the same iteration count.
+// returns zero. If the initial derivation maps to zero, it retries with a
+// counter appended to the input (deterministic, both peers iterate identically).
+// The iteration count is configurable via QVOLE_KDF_ITERATIONS (default 600000).
+// Both peers must use the same iteration count.
 func PasswordToScalar(password string) *big.Int {
 	pwBytes := []byte("qvole-spake2-pw:" + password)
 	salt := []byte("qvole-spake2-pw:")
-	h := pbkdf2.Key(pwBytes, salt, kdfIterations, 32, sha256.New)
-	s := new(big.Int).SetBytes(h)
-	s.Mod(s, Curve.Params().N)
-	if s.Sign() == 0 {
-		return big.NewInt(1)
+	for counter := uint64(0); ; counter++ {
+		var h []byte
+		if counter == 0 {
+			h = pbkdf2.Key(pwBytes, salt, kdfIterations, 32, sha256.New)
+		} else {
+			var b [8]byte
+			binary.BigEndian.PutUint64(b[:], counter)
+			h = pbkdf2.Key(append(pwBytes, b[:]...), salt, kdfIterations, 32, sha256.New)
+		}
+		s := new(big.Int).SetBytes(h)
+		s.Mod(s, Curve.Params().N)
+		if s.Sign() != 0 {
+			return s
+		}
 	}
-	return s
 }
 
 func generatorScalar(gx, gy *big.Int, scalar *big.Int) (x, y *big.Int) {
-	return Curve.ScalarMult(gx, gy, scalar.Bytes())
+	return Curve.ScalarMult(gx, gy, scalarBytes32(scalar))
+}
+
+// scalarBytes32 returns a fixed-length 32-byte big-endian representation of s,
+// left-padded with zeros. Variable-length big.Int.Bytes() would leak the
+// position of the highest non-zero byte through ScalarMult's iteration count;
+// using a fixed length closes that timing side channel on secret scalars.
+func scalarBytes32(s *big.Int) []byte {
+	b := s.Bytes()
+	if len(b) >= 32 {
+		return b
+	}
+	pad := make([]byte, 32)
+	copy(pad[32-len(b):], b)
+	return pad
 }
 
 // State holds ephemeral key material for one side of a SPAKE2 PAKE exchange.
+// Two independent ephemeral scalars (scalarM, scalarN) are used so that
+// subtracting the two blinded points does NOT cancel the ephemeral
+// contribution. If a single scalar were reused for both blinded points, an
+// observer could compute blindedM - blindedN = pw*(M-N) and verify candidate
+// passwords offline — defeating the core PAKE property.
 type State struct {
 	curve     elliptic.Curve
 	pwScalar  *big.Int
-	scalar    *big.Int
+	scalarM   *big.Int
+	scalarN   *big.Int
 	blindedXM *big.Int
 	blindedYM *big.Int
 	blindedXN *big.Int
 	blindedYN *big.Int
 }
 
-// NewState creates a new SPAKE2 state, generating a fresh ephemeral scalar
-// and computing both M-based and N-based blinded points (y*G + w*M and y*G + w*N).
-// The caller determines the protocol role after seeing the peer's points and
-// uses the appropriate point via ComputeShared.
+// NewState creates a new SPAKE2 state, generating two independent ephemeral
+// scalars and computing M-based and N-based blinded points
+// (rM*G + w*M and rN*G + w*N). The caller determines the protocol role after
+// seeing the peer's points and uses the appropriate point via ComputeShared.
 func NewState(password string) (*State, error) {
 	curve := Curve
 	pwScalar := PasswordToScalar(password)
 
-	priv := make([]byte, 32)
-	if _, err := rand.Read(priv); err != nil {
-		return nil, fmt.Errorf("spake2 rand: %w", err)
+	privM := make([]byte, 32)
+	if _, err := rand.Read(privM); err != nil {
+		return nil, fmt.Errorf("spake2 randM: %w", err)
 	}
-	scalar := new(big.Int).SetBytes(priv)
-	scalar.Mod(scalar, curve.Params().N)
+	privN := make([]byte, 32)
+	if _, err := rand.Read(privN); err != nil {
+		ZeroBytes(privM)
+		return nil, fmt.Errorf("spake2 randN: %w", err)
+	}
+	scalarM := new(big.Int).SetBytes(privM)
+	scalarM.Mod(scalarM, curve.Params().N)
+	scalarN := new(big.Int).SetBytes(privN)
+	scalarN.Mod(scalarN, curve.Params().N)
 
-	pubX, pubY := curve.ScalarBaseMult(priv)
-	ZeroBytes(priv)
+	pubMX, pubMY := curve.ScalarBaseMult(privM)
+	pubNX, pubNY := curve.ScalarBaseMult(privN)
+	ZeroBytes(privM)
+	ZeroBytes(privN)
 
 	bxm, bym := generatorScalar(Mx, My, pwScalar)
-	blindedXM, blindedYM := curve.Add(pubX, pubY, bxm, bym)
+	blindedXM, blindedYM := curve.Add(pubMX, pubMY, bxm, bym)
 
 	bxn, byn := generatorScalar(Nx, Ny, pwScalar)
-	blindedXN, blindedYN := curve.Add(pubX, pubY, bxn, byn)
+	blindedXN, blindedYN := curve.Add(pubNX, pubNY, bxn, byn)
 
 	return &State{
 		curve:     curve,
 		pwScalar:  pwScalar,
-		scalar:    scalar,
+		scalarM:   scalarM,
+		scalarN:   scalarN,
 		blindedXM: blindedXM,
 		blindedYM: blindedYM,
 		blindedXN: blindedXN,
@@ -205,8 +247,11 @@ func (s *State) Destroy() {
 	if s.pwScalar != nil {
 		s.pwScalar.SetInt64(0)
 	}
-	if s.scalar != nil {
-		s.scalar.SetInt64(0)
+	if s.scalarM != nil {
+		s.scalarM.SetInt64(0)
+	}
+	if s.scalarN != nil {
+		s.scalarN.SetInt64(0)
 	}
 	if s.blindedXM != nil {
 		s.blindedXM.SetInt64(0)
@@ -236,9 +281,9 @@ func (s *State) ComputeShared(peerBlindedBytes []byte, peerUsedM bool) ([]byte, 
 
 	var pwx, pwy *big.Int
 	if peerUsedM {
-		pwx, pwy = s.curve.ScalarMult(Mx, My, s.pwScalar.Bytes())
+		pwx, pwy = s.curve.ScalarMult(Mx, My, scalarBytes32(s.pwScalar))
 	} else {
-		pwx, pwy = s.curve.ScalarMult(Nx, Ny, s.pwScalar.Bytes())
+		pwx, pwy = s.curve.ScalarMult(Nx, Ny, scalarBytes32(s.pwScalar))
 	}
 	pwyNeg := new(big.Int).Sub(s.curve.Params().P, pwy)
 	unblindedX, unblindedY := s.curve.Add(peerBlindedX, peerBlindedY, pwx, pwyNeg)
@@ -247,7 +292,13 @@ func (s *State) ComputeShared(peerBlindedBytes []byte, peerUsedM bool) ([]byte, 
 		return nil, fmt.Errorf("spake2: unblinded point is identity")
 	}
 
-	sharedX, _ := s.curve.ScalarMult(unblindedX, unblindedY, s.scalar.Bytes())
+	// If peer blinded with M, I am the server using my N path (scalarN).
+	// If peer blinded with N, I am the client using my M path (scalarM).
+	myScalar := s.scalarN
+	if !peerUsedM {
+		myScalar = s.scalarM
+	}
+	sharedX, _ := s.curve.ScalarMult(unblindedX, unblindedY, scalarBytes32(myScalar))
 	if sharedX.Sign() == 0 {
 		return nil, fmt.Errorf("spake2: shared x-coordinate is zero")
 	}
