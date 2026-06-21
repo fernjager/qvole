@@ -145,7 +145,7 @@ conn, err := qvole.Dial(ctx,
 | Option | Default | Description |
 |---|---|---|
 | `WithPunchTimeout(d Duration)` | 10s | Max time for UDP hole punching |
-| `WithExchangeDeadline(d Duration)` | 5min | Max time for SPAKE2 exchange |
+| `WithExchangeDeadline(d Duration)` | 90s | Max time for SPAKE2 exchange |
 | `WithKeepAlive(d Duration)` | 2s | QUIC keepalive interval |
 | `WithIdleTimeout(d Duration)` | 2min | QUIC idle timeout |
 | `WithHandshakeTimeout(d Duration)` | 30s | QUIC handshake timeout |

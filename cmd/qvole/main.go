@@ -29,7 +29,7 @@ var debug bool
 
 func main() {
 	log.SetFlags(0)
-	os.Setenv("QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING", "1")
+	_ = os.Setenv("QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING", "1")
 
 	for _, a := range os.Args[1:] {
 		if a == "-v" || a == "--version" {
@@ -47,7 +47,13 @@ func main() {
 	case "relay":
 		runRelay(os.Args[2:])
 	case "exec":
-		runExec(os.Args[2:])
+		if err := runExec(os.Args[2:]); err != nil {
+			var ec exitCodeError
+			if errors.As(err, &ec) {
+				os.Exit(ec.code)
+			}
+			fatalf(util.LogExec, "%v", err)
+		}
 	case "tunnel":
 		runTunnel(os.Args[2:])
 	case "pipe":
@@ -158,7 +164,14 @@ func (s *stringSlice) Set(value string) error {
 	return nil
 }
 
-func runExec(args []string) {
+// exitCodeError wraps an exit code so it can be propagated through the call
+// stack and converted to os.Exit only at the top level, after all deferred
+// cleanup (QUIC close frames, TLS session tickets, etc.) has run.
+type exitCodeError struct{ code int }
+
+func (e exitCodeError) Error() string { return fmt.Sprintf("exit code %d", e.code) }
+
+func runExec(args []string) error {
 	fs := flag.NewFlagSet("exec", flag.ContinueOnError)
 	cf := setupCommonFlags(fs)
 	code := fs.String("code", "", "Connection code (or $QVOLE_CODE)")
@@ -181,9 +194,12 @@ func runExec(args []string) {
 	err = app.RunExec(ctx, relayAddr, finalCode, *cmdFlag, *cmdFlag != "")
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		os.Exit(exitErr.ExitCode())
+		return exitCodeError{code: exitErr.ExitCode()}
 	}
-	maybeFatal(util.LogExec, err)
+	if err != nil && err != context.Canceled {
+		fatalf(util.LogExec, "%v", err)
+	}
+	return nil
 }
 
 func runTunnel(args []string) {

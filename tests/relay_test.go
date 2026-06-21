@@ -41,48 +41,78 @@ func TestRelayMessageExchange(t *testing.T) {
 	}
 	defer clientB.Close()
 
-	// Both clients register in the same room
+	// Both clients register in the same room via the two-step cookie handshake.
 	room := "99401-test-exchange"
-	msgA := fmt.Sprintf("REG %s\n", room)
-	_, err = clientA.WriteTo([]byte(msgA), relayUDPAddr)
+	buf := make([]byte, testBufSize)
+
+	// --- Client A: REG → REGD cookie → REG with cookie → REGD OK ---
+	_, err = clientA.WriteTo([]byte("REG "+room+"\n"), relayUDPAddr)
 	if err != nil {
 		t.Fatalf("client A REG: %v", err)
 	}
-
-	buf := make([]byte, testBufSize)
 	clientA.SetReadDeadline(time.Now().Add(3 * time.Second))
 	n, _, err := clientA.ReadFrom(buf)
 	if err != nil {
-		t.Fatalf("client A read REGD: %v", err)
+		t.Fatalf("client A read REGD cookie: %v", err)
 	}
-	respA := string(buf[:n])
-	if !strings.HasPrefix(respA, fmt.Sprintf("REGD %s", room)) {
-		t.Fatalf("client A unexpected response: %s", respA)
+	respA := strings.TrimSpace(string(buf[:n]))
+	if !strings.HasPrefix(respA, "REGD "+room+" ") {
+		t.Fatalf("client A unexpected cookie response: %s", respA)
 	}
-	t.Logf("client A got: %s", strings.TrimSpace(respA))
+	cookieA := strings.TrimPrefix(respA, "REGD "+room+" ")
+	t.Logf("client A got cookie: %s", cookieA)
 
-	// Client B registers in same room
-	msgB := fmt.Sprintf("REG %s\n", room)
-	_, err = clientB.WriteTo([]byte(msgB), relayUDPAddr)
+	// Echo cookie to complete registration.
+	_, err = clientA.WriteTo([]byte("REG "+room+" "+cookieA+"\n"), relayUDPAddr)
+	if err != nil {
+		t.Fatalf("client A REG+cookie: %v", err)
+	}
+	clientA.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n, _, err = clientA.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("client A read REGD OK: %v", err)
+	}
+	respA2 := strings.TrimSpace(string(buf[:n]))
+	if !strings.HasPrefix(respA2, "REGD "+room+" OK ") {
+		t.Fatalf("client A unexpected OK response: %s", respA2)
+	}
+	t.Logf("client A got: %s", respA2)
+
+	// --- Client B: same two-step handshake ---
+	_, err = clientB.WriteTo([]byte("REG "+room+"\n"), relayUDPAddr)
 	if err != nil {
 		t.Fatalf("client B REG: %v", err)
 	}
-
 	clientB.SetReadDeadline(time.Now().Add(3 * time.Second))
 	n, _, err = clientB.ReadFrom(buf)
 	if err != nil {
-		t.Fatalf("client B read REGD: %v", err)
+		t.Fatalf("client B read REGD cookie: %v", err)
 	}
-	respB := string(buf[:n])
-	if !strings.HasPrefix(respB, fmt.Sprintf("REGD %s", room)) {
-		t.Fatalf("client B unexpected response: %s", respB)
+	respB := strings.TrimSpace(string(buf[:n]))
+	if !strings.HasPrefix(respB, "REGD "+room+" ") {
+		t.Fatalf("client B unexpected cookie response: %s", respB)
 	}
-	t.Logf("client B got: %s", strings.TrimSpace(respB))
+	cookieB := strings.TrimPrefix(respB, "REGD "+room+" ")
+	t.Logf("client B got cookie: %s", cookieB)
 
-	// Client A sends a MSG; client B should receive MSGD
+	_, err = clientB.WriteTo([]byte("REG "+room+" "+cookieB+"\n"), relayUDPAddr)
+	if err != nil {
+		t.Fatalf("client B REG+cookie: %v", err)
+	}
+	clientB.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n, _, err = clientB.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("client B read REGD OK: %v", err)
+	}
+	respB2 := strings.TrimSpace(string(buf[:n]))
+	if !strings.HasPrefix(respB2, "REGD "+room+" OK ") {
+		t.Fatalf("client B unexpected OK response: %s", respB2)
+	}
+	t.Logf("client B got: %s", respB2)
+
+	// Client A sends a MSG; client B should receive MSGD.
 	testPayload := hex.EncodeToString([]byte("hello-relay-test-payload-for-exchange"))
-	msgSend := fmt.Sprintf("MSG %s spake2 %s\n", room, testPayload)
-	_, err = clientA.WriteTo([]byte(msgSend), relayUDPAddr)
+	_, err = clientA.WriteTo([]byte("MSG "+room+" spake2 "+testPayload+"\n"), relayUDPAddr)
 	if err != nil {
 		t.Fatalf("client A MSG: %v", err)
 	}
@@ -93,7 +123,7 @@ func TestRelayMessageExchange(t *testing.T) {
 		t.Fatalf("client B read MSGD: %v", err)
 	}
 	respForward := string(buf[:n])
-	expectedPrefix := fmt.Sprintf("MSGD spake2 %s", testPayload)
+	expectedPrefix := "MSGD spake2 " + testPayload
 	if !strings.HasPrefix(respForward, expectedPrefix) {
 		t.Fatalf("client B expected MSGD with payload, got: %s", strings.TrimSpace(respForward))
 	}

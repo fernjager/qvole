@@ -151,13 +151,14 @@ the same room (by detecting a `MSGD` reply with a valid-looking SPAKE2 point).
 exhaustively searching 2⁵² codes would take ~10¹³ years. Rate limits are enforced
 in the relay's hot path and cannot be bypassed by a single UDP source.
 
-**Residual risk:** The default 2-clients-per-room limit (tunable via
-`QVOLE_RELAY_MAX_CLIENTS`) caps the room to two peers, so a distributed attack
-cannot exceed a combined 20 msg/s toward a single target room (2 clients ×
-10 msg/s). An attacker who knows the 4-digit prefix (e.g. from overhearing it)
-still faces the remaining 40-bit word space, which takes ~1.7 million years to
-exhaust at 20 msg/s. The 100-rooms-per-IP limit further restricts the number of
-rooms an attacker can simultaneously probe from a single source.
+**Residual risk:** Rooms have no pairwise limit; any number of clients can join
+up to the hard cap (`maxClientsHard`, default 20). An attacker who fills a room
+to the hard cap can observe SPAKE2 blinded points but cannot decrypt metadata
+(protected by the SPAKE2 shared secret). A distributed attack cannot exceed a
+combined 200 msg/s toward a single target room (20 clients × 10 msg/s). The
+10-rooms-per-IP limit further restricts the number of rooms an attacker can
+simultaneously probe from a single source. The 1-minute registration TTL bounds
+client lifetime regardless of re-REG activity.
 
 #### Pre-image Attack on Code Generation
 
@@ -213,20 +214,29 @@ The relay can drop, delay, or reorder messages between peers.
 **Mitigation:** Both SPAKE2 points and confirms are retransmitted every 2 s
 continuously, independent of state. Each received point initiates its own
 confirm retry cycle, and incoming confirms are tried against all known
-candidate points. If no confirm matches within the deadline (5 min exchange
+candidate points. If no confirm matches within the deadline (90-second exchange
 deadline), the peer exits. The protocol makes no guarantees about DoS
 resilience; the relay is a single point of failure for rendezvous.
 
 **Mitigations in the relay implementation:**
 - Non-blocking packet dispatch prevents the reader goroutine from stalling under load;
   packets are dropped when worker queues fill.
-- Per-IP room cap (100) prevents a single host from exhausting all relay rooms.
+- Per-IP room cap (10) prevents a single host from exhausting all relay rooms.
 - Stale-room eviction before rejecting at capacity ensures active rooms can always
   be created even when the relay is near its 10,000-room limit.
 - REG rate limiter is sharded across 16 mutexes, eliminating the single global
   bottleneck.
 - Message queuing has been removed entirely; the relay never buffers messages
   between clients, eliminating replay amplification and memory pressure vectors.
+- MSG phase parameter is allowlisted (`spake2`, `confirm`); unknown phases are
+  dropped, preventing protocol injection via unvalidated `MSGD` forwarding.
+- REG cookie handshake requires a return-routability round trip before a client
+  is admitted to a room, preventing UDP source-address spoofing from installing
+  victim addresses for reflection/amplification.
+- Bounded goroutine pool for outbound writes prevents slow targets from blocking
+  relay workers. Per-write mutex serialises `SetWriteDeadline`/`WriteTo` pairs.
+- Rate-limit map entries are capped (100k/shard) with fast (5 s) cleanup to
+  prevent unbounded memory growth under source-IP floods.
 
 #### Relay Injects Fake Messages
 
@@ -283,10 +293,14 @@ path) can try to guess the code offline: for each candidate code, compute
 valid public key.
 
 **Mitigation:** SPAKE2 is PAKE-secure: without the password, the blinded points
-are indistinguishable from random group elements. No offline verification oracle
-exists. The attacker would need to solve the Computational Diffie-Hellman problem
-to verify a guess. This property holds even though P-256 is a standard curve (not
-a symmetric-primitive-based PAKE like OPAQUE).
+are indistinguishable from random group elements. The implementation uses two
+independent ephemeral scalars (`rM`, `rN`) — one per blinded point — so
+subtracting the two captured points yields `(rM−rN)·G + pw·(M−N)`, which
+contains the unknown difference of two ephemeral scalars. No offline
+verification oracle exists. The attacker would need to solve the Computational
+Diffie-Hellman problem to verify a guess. This property holds even though P-256
+is a standard curve (not a symmetric-primitive-based PAKE like OPAQUE).
+
 
 #### Small-Subgroup Attack
 
@@ -324,8 +338,11 @@ HKDF (`spake2/spake2.go`). Both sides perform identical padding.
 If `SHA-256("qvole-spake2-pw:" + code) mod N` produces zero, the blinded point
 would be `G·r` with no password contribution, breaking SPAKE2's security.
 
-**Mitigation:** The password scalar is clamped to 1 if the hash produces zero
-(`spake2/spake2.go`).
+**Mitigation:** `PasswordToScalar` retries with a deterministic counter appended
+to the PBKDF2 input. Counter 0 uses the original derivation (identical output to
+the previous implementation); counter > 0 changes the derivation path. Both peers
+iterate identically, producing the same scalar without coordination. The zero
+case has probability ~1/2^256 and has never occurred.
 
 ---
 
@@ -762,7 +779,7 @@ not merely a transport upgrade.
 
 **Reliability:** QUIC provides loss detection and retransmission. The SPAKE2
 exchange already handles this at the application layer: points and confirms are
-resent every 2 seconds, and REGs every 60 seconds. QUIC's reliability would be
+resent every 2 seconds, and REGs every 30 seconds. QUIC's reliability would be
 redundant and potentially counterproductive because automatic retransmission of stale
 messages would waste bandwidth when the application-level resend already covers
 late-joining peers.
@@ -908,6 +925,14 @@ The protocol supports exactly two peers per connection. Multi-party
 conferencing would require either pairwise connections (N² SPAKE2 exchanges)
 or a group PAKE (not implemented).
 
+### KDF Iteration Count Mismatch
+
+If peers use different `QVOLE_KDF_ITERATIONS` values, they compute different
+password scalars and the SPAKE2 confirm fails with a generic "timeout exchanging
+with peer" error. Both peers must use the same iteration count. A future protocol
+version could exchange the iteration count in the SPAKE2 payload to fail fast
+with a clear diagnostic.
+
 ### Concurrent Handshake Collisions in Same Room
 
 SPAKE2 blinded points carry no peer identifier beyond their content. If three
@@ -973,7 +998,7 @@ keys and the certificate keys; user data remains unrecoverable.
 
 #### Why 600,000 Rounds
 
-The SPAKE2 exchange completes in seconds (typically 5-30s, max 5 min
+The SPAKE2 exchange completes in seconds (typically 5-30s, max 90 s
 deadline). After the handoff to direct QUIC, code-derived keys are never
 used again. The PBKDF2 amplification (52 bits → ~71 bits of effort) is
 proportionate to the threat for three reasons:
@@ -991,7 +1016,7 @@ proportionate to the threat for three reasons:
    on a modern CPU. The per-side compute cost is a small fraction of the
    total exchange time dominated by relay round-trips and hole punching.
    On a 400MHz embedded CPU the derivation may take 2-10s, still well
-   within the 5-minute exchange deadline.
+   within the 90-second exchange deadline.
 
 #### Time to Break: User-Chosen Codes
 
@@ -1115,13 +1140,13 @@ slow peers from blocking the relay.
 |---|---|---|---|
 | `minCodeLen` | `cmd/qvole/main.go` | 8 | Minimum code length |
 | `maxCodeLen` | `cmd/qvole/main.go` | 256 | Maximum code length |
-| `ExchangeDeadline` | `internal/engine/connect.go` | 5 min | Handshake timeout (overridable via `QVOLE_EXCHANGE_DEADLINE_MS`) |
-| `RegInterval` | `internal/engine/connect.go` | 60 s | REG re-send interval; late-joining peer may wait up to this long to be discovered |
+| `ExchangeDeadline` | `internal/engine/connect.go` | 90 s | Handshake timeout (overridable via `QVOLE_EXCHANGE_DEADLINE_MS`) |
+| `RegInterval` | `internal/engine/connect.go` | 30 s | REG re-send interval; late-joining peer may wait up to this long to be discovered |
 | `ConfirmPayloadSize` | `internal/engine/connect.go` | 160 | Fixed confirm size (incl. 32 B random padding) |
 | `maxMsgRate` | `relay/room.go` | 10/s | Rate limit |
 | `maxRooms` | `relay/room.go` | 10000 | Room cap |
-| `maxRoomsPerIP` | `relay/room.go` | 100 | Per-IP room cap |
-| `maxClientsPerRoom` | `relay/room.go` | 2 | Room membership cap (default; tunable) |
+| `maxRoomsPerIP` | `relay/room.go` | 10 | Per-IP room cap |
+| `maxClientsHard` | `relay/room.go` | 20 | Hard cap on clients per room (abuse guard) |
 | `maxDatagramLen` | `relay/room.go` | 1400 | Raw UDP datagram limit |
 | `MaxIncomingUniStreams` | `internal/engine/transport.go` | 0 | No uni streams |
 | `maxTunnelRequests` | `internal/app/tunnel_request.go` | 100 | Spec count limit |

@@ -16,9 +16,13 @@ see [SECURITY.md](./SECURITY.md).
 Peer A                              Relay                              Peer B
   │                                   │                                   │
   │── REG <room> ────────────────────►│                                   │
-  │◄─ REGD <room> <addr> ─────────────│                                   │
+  │◄─ REGD <room> <cookie> ───────────│                                   │
+  │── REG <room> <cookie> ───────────►│                                   │
+  │◄─ REGD <room> OK <addr> ──────────│                                   │
   │                                   │◄── REG <room> ────────────────────│
-  │                                   │─── REGD <room> <addr> ───────────►│
+  │                                   │─── REGD <room> <cookie> ─────────►│
+  │                                   │◄── REG <room> <cookie> ───────────│
+  │                                   │─── REGD <room> OK <addr> ────────►│
   │                                   │                                   │
   │── MSG <room> spake2 <hex> ───────►│◄── MSG <room> spake2 <hex> ───────│
   │◄─ MSGD spake2 <hex> ──────────────│─── MSGD spake2 <hex> ────────────►│
@@ -74,30 +78,38 @@ Both peers compute the same room name and connect to the same relay.
 Peer         Relay
   │            │
   │─── REG ───►│  Register in room "<room>"
-  │◄── REGD ───│  Acknowledged with external address
+  │◄── REGD ───│  Cookie challenge (32 hex chars)
+  │─── REG ───►│  Echo cookie to prove return routability
+  │◄── REGD ───│  Acknowledged with external address (OK <addr>)
   │            │
   │─── MSG ───►│  Send spake2/confirm payload
   │◄── MSGD ───│  Receive peer's messages
 ```
 
 1. Peer sends `REG <room>\n`.
-2. Relay validates the room name.
-3. Relay replies `REGD <room> <addr>\n`, the `<addr>` is the peer's external
-   (UDP source) address as seen by the relay.
-4. Messages are sent as `MSG <room> <phase> <hex>\n` and delivered as `MSGD <phase> <hex>\n`.
+2. Relay validates the room name and replies `REGD <room> <cookie>\n`, where
+   `<cookie>` is 32 hex characters (16 random bytes).
+3. Peer echoes the cookie: `REG <room> <cookie>\n`. This proves the peer
+   can receive datagrams at the claimed source address (source-IP spoofing
+   would not receive the cookie).
+4. Relay admits the peer and replies `REGD <room> OK <addr>\n`, where `<addr>`
+   is the peer's external (UDP source) address as seen by the relay.
+5. Messages are sent as `MSG <room> <phase> <hex>\n` and delivered as `MSGD <phase> <hex>\n`.
    Messages are forwarded to all other registered clients in the room; there is
    no message queuing; if no other client is registered, the message is dropped.
-   Peers retransmit REG every 60 s and SPAKE2/confirm payloads every 2 s
+   Peers retransmit REG every 30 s and SPAKE2/confirm payloads every 2 s
    throughout the exchange; each received SPAKE2 point creates an
    independent candidate, and confirms are tried against all known
    candidates.
 
 **Registration lifecycle:**
-- Clients expire after 5 min without a REG message.
-- Rooms expire when empty for 5 min.
-- A cleanup sweep runs every 60 s.
+- Clients expire after 1 min without a REG message.
+- Rooms expire when empty for 1 min.
+- Pending (cookie-challenged) registrations expire after 5 s.
+- A cleanup sweep runs every 1 min for rooms and every 5 s for rate-limit maps.
 - Room capacity (10,000) uses stale-room eviction before rejecting new registrations.
-- Per-IP room cap (100) prevents a single host from exhausting the relay.
+- Per-IP room cap (10) prevents a single host from exhausting the relay.
+- Hard client cap per room (20, default `maxClientsHard`) as an abuse guard.
 
 ---
 
@@ -127,7 +139,7 @@ and respond to every incoming point with a confirm. Each received point becomes
 an independent *candidate* with its own confirm retry cycle. Candidates are capped
 at 50 and buffered confirms at 200 to bound resource consumption. Incoming confirms
 are buffered and tried against all known candidates. The exchange exits on the
-first matching confirm or after the **5-minute exchange deadline**; no phase
+first matching confirm or after the **90-second exchange deadline**; no phase
 coordination, no single-in-flight state machine, no replacement logic, no
 reset-on-failure.
 
@@ -470,8 +482,10 @@ acknowledgements, and no delivery ordering. Peers retransmit to overcome loss
 
 | Direction | Format | Description |
 |-----------|--------|-------------|
-| Client → Relay | `REG <room>\n` | Register in room |
-| Relay → Client | `REGD <room> <addr>\n` | Registration acknowledged with external address |
+| Client → Relay | `REG <room>\n` | Register in room (step 1 of cookie handshake) |
+| Relay → Client | `REGD <room> <cookie>\n` | Cookie challenge (32 hex chars, 16 random bytes) |
+| Client → Relay | `REG <room> <cookie>\n` | Echo cookie to prove return routability |
+| Relay → Client | `REGD <room> OK <addr>\n` | Registration confirmed with external address |
 | Client → Relay | `MSG <room> spake2 <hex>\n` | SPAKE2 blinded point + fingerprint |
 | Client → Relay | `MSG <room> confirm <hex>\n` | HMAC confirm + encrypted address |
 | Relay → Client | `MSGD spake2 <hex>\n` | Forwarded SPAKE2 payload |
@@ -566,11 +580,11 @@ A protocol implementer must not exceed these:
 | Constraint | Value | Purpose |
 |---|---|---|
 | Max message rate per client | 10 msg/s | Online brute-force protection |
-| Client TTL (REG renewal) | 5 min | Stale client eviction |
-| Room TTL when empty | 5 min | Garbage collection |
-| Max clients per room | 2 (default, tunable) | Resource bounding |
+| Client TTL (REG renewal) | 1 min | Stale client eviction |
+| Room TTL when empty | 1 min | Garbage collection |
+| Hard client cap per room | 20 (default) | Abuse guard |
 | Max rooms | 10,000 | Relay capacity |
-| Max rooms per IP | 100 | Single-host DoS mitigation |
+| Max rooms per IP | 10 | Single-host DoS mitigation |
 | Max UDP datagram length | 1400 bytes | Safe payload ceiling; avoids fragmentation across Ethernet (1500 MTU minus IP+UDP headers) and accommodates tunnel overhead from IPv6, VPNs, and PPPoE without relying on path MTU discovery, which is unreliable for UDP |
 | Room name max length | 64 chars | Validation |
 

@@ -150,9 +150,9 @@ func ConnectPeerWithConfig(ctx context.Context, relayAddr string, code string, c
 	<-successCh // wait for hole punch goroutines to observe cancellation before clearing deadline
 	udpConn.SetReadDeadline(time.Time{})
 
-	helperCtx, helperCancel := context.WithTimeout(context.Background(), helperTimeout)
+	helperCtx, helperCancel := context.WithTimeout(ctx, helperTimeout)
+	defer helperCancel()
 	go func() {
-		defer helperCancel()
 		t := time.NewTicker(helperTickerInterval)
 		defer t.Stop()
 		for {
@@ -196,8 +196,8 @@ func ConnectPeerWithConfig(ctx context.Context, relayAddr string, code string, c
 }
 
 const (
-	ExchangeDeadline     = 5 * time.Minute
-	RegInterval          = 60 * time.Second
+	ExchangeDeadline     = 90 * time.Second
+	RegInterval          = 30 * time.Second
 	MaxMetadataSize      = 52
 	confirmNonceSize     = 16
 	confirmHMACSize      = 32
