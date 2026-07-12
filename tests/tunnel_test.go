@@ -23,7 +23,7 @@ func runTunnelRemote(t *testing.T, echoPort, tunnelPort int, payload string, cod
 
 	_, echoClose := startEchoServer(t, echoAddr)
 	defer echoClose()
-	time.Sleep(200 * time.Millisecond)
+	waitForListener(t, echoAddr, 5*time.Second)
 
 	logDir := t.TempDir()
 	initLog := filepath.Join(logDir, "init_stderr.log")
@@ -38,7 +38,6 @@ func runTunnelRemote(t *testing.T, echoPort, tunnelPort int, payload string, cod
 	}
 	defer initCmd.Process.Kill()
 	initLogF.Close()
-	time.Sleep(2 * time.Second)
 
 	peerLog := filepath.Join(logDir, "peer_stderr.log")
 	peerLogF, _ := os.Create(peerLog)
@@ -53,9 +52,10 @@ func runTunnelRemote(t *testing.T, echoPort, tunnelPort int, payload string, cod
 	}
 	defer peerCmd.Process.Kill()
 	peerLogF.Close()
-	time.Sleep(3 * time.Second)
 
-	conn, err := dialWithRetry(tunnelAddr, 10*time.Second)
+	waitForListener(t, tunnelAddr, 15*time.Second)
+
+	conn, err := net.Dial("tcp", tunnelAddr)
 	if err != nil {
 		initData, _ := os.ReadFile(initLog)
 		peerData, _ := os.ReadFile(peerLog)
@@ -113,7 +113,8 @@ func TestTunnelMulti(t *testing.T) {
 	defer echoClose1()
 	_, echoClose2 := startEchoServer(t, fmt.Sprintf("127.0.0.1:%d", echoPort2))
 	defer echoClose2()
-	time.Sleep(200 * time.Millisecond)
+	waitForListener(t, fmt.Sprintf("127.0.0.1:%d", echoPort1), 5*time.Second)
+	waitForListener(t, fmt.Sprintf("127.0.0.1:%d", echoPort2), 5*time.Second)
 
 	logDir := t.TempDir()
 
@@ -144,7 +145,11 @@ func TestTunnelMulti(t *testing.T) {
 	}
 	defer initCmd.Process.Kill()
 	initLogF.Close()
-	time.Sleep(3 * time.Second)
+
+	fwdAddr1 := fmt.Sprintf("127.0.0.1:%d", fwdPort)
+	fwdAddr2 := fmt.Sprintf("127.0.0.1:%d", fwdPort2)
+	waitForListener(t, fwdAddr1, 15*time.Second)
+	waitForListener(t, fwdAddr2, 15*time.Second)
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 2)
@@ -152,7 +157,7 @@ func TestTunnelMulti(t *testing.T) {
 	testPort := func(port int, label string) {
 		defer wg.Done()
 		addr := fmt.Sprintf("127.0.0.1:%d", port)
-		conn, err := dialWithRetry(addr, 10*time.Second)
+		conn, err := net.Dial("tcp", addr)
 		if err != nil {
 			errCh <- fmt.Errorf("%s: %w", label, err)
 			return
@@ -192,7 +197,7 @@ func TestTunnelLocal(t *testing.T) {
 
 	_, echoClose := startEchoServer(t, fmt.Sprintf("127.0.0.1:%d", echoPort))
 	defer echoClose()
-	time.Sleep(200 * time.Millisecond)
+	waitForListener(t, fmt.Sprintf("127.0.0.1:%d", echoPort), 5*time.Second)
 
 	logDir := t.TempDir()
 
@@ -223,9 +228,11 @@ func TestTunnelLocal(t *testing.T) {
 	}
 	defer initCmd.Process.Kill()
 	initLogF.Close()
-	time.Sleep(5 * time.Second)
 
-	conn, err := dialWithRetry(fmt.Sprintf("127.0.0.1:%d", fwdPort), 10*time.Second)
+	fwdAddr := fmt.Sprintf("127.0.0.1:%d", fwdPort)
+	waitForListener(t, fwdAddr, 15*time.Second)
+
+	conn, err := net.Dial("tcp", fwdAddr)
 	if err != nil {
 		initData, _ := os.ReadFile(initLog)
 		peerData, _ := os.ReadFile(peerLog)
@@ -393,9 +400,11 @@ func TestTunnelTargetDown(t *testing.T) {
 	}
 	defer initCmd.Process.Kill()
 	initLogF.Close()
-	time.Sleep(5 * time.Second)
 
-	conn, err := dialWithRetry(fmt.Sprintf("127.0.0.1:%d", fwdPort), 10*time.Second)
+	fwdAddr := fmt.Sprintf("127.0.0.1:%d", fwdPort)
+	waitForListener(t, fwdAddr, 15*time.Second)
+
+	conn, err := net.Dial("tcp", fwdAddr)
 	if err != nil {
 		initData, _ := os.ReadFile(initLog)
 		peerData, _ := os.ReadFile(peerLog)

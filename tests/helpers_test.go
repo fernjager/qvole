@@ -206,16 +206,19 @@ func startEchoServer(t *testing.T, addr string) (net.Listener, func()) {
 	return ln, func() { ln.Close() }
 }
 
-func dialWithRetry(addr string, timeout time.Duration) (net.Conn, error) {
+// waitForListener polls addr until a TCP connection is accepted or timeout expires.
+func waitForListener(t *testing.T, addr string, timeout time.Duration) {
+	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
 		if err == nil {
-			return conn, nil
+			conn.Close()
+			return
 		}
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 	}
-	return nil, fmt.Errorf("dial %s: timeout after %v", addr, timeout)
+	t.Fatalf("port %s not listening after %v", addr, timeout)
 }
 
 func mustPipe(t testing.TB) (*os.File, *os.File) {
