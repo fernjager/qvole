@@ -2,13 +2,32 @@ package app
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net"
 	"os"
 	"sync"
+
+	"github.com/quic-go/quic-go"
 
 	"github.com/fernjager/qvole/internal/engine"
 	"github.com/fernjager/qvole/internal/util"
 )
+
+// isClosedError reports whether err is a benign error caused by one side of a
+// bidirectional copy closing the other during shutdown. This includes:
+//   - net.ErrClosed / io.ErrClosedPipe (local TCP/half-close races)
+//   - quic.ApplicationError with code 0 (graceful remote close, e.g. CloseWithError(0, ...))
+func isClosedError(err error) bool {
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+		return true
+	}
+	var appErr *quic.ApplicationError
+	if errors.As(err, &appErr) && appErr.ErrorCode == 0 {
+		return true
+	}
+	return false
+}
 
 func bidirectionalCopy(a, b io.ReadWriter) {
 	var wg sync.WaitGroup
@@ -30,7 +49,7 @@ func bidirectionalCopy(a, b io.ReadWriter) {
 		defer wg.Done()
 		buf := engine.BufferPool.Get().([]byte)
 		defer engine.PutBuffer(buf)
-		if _, err := io.CopyBuffer(a, b, buf); err != nil {
+		if _, err := io.CopyBuffer(a, b, buf); err != nil && !isClosedError(err) {
 			util.LogCopy.PrintfError("Copy error (a←b): %v", err)
 		}
 		closeBoth()
@@ -40,7 +59,7 @@ func bidirectionalCopy(a, b io.ReadWriter) {
 		defer wg.Done()
 		buf := engine.BufferPool.Get().([]byte)
 		defer engine.PutBuffer(buf)
-		if _, err := io.CopyBuffer(b, a, buf); err != nil {
+		if _, err := io.CopyBuffer(b, a, buf); err != nil && !isClosedError(err) {
 			util.LogCopy.PrintfError("Copy error (b←a): %v", err)
 		}
 		closeBoth()

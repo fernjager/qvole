@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-07-12
+### Security
+- Bump Go toolchain to 1.26.5 for `crypto/tls` and `os` security fixes.
+- Update `golang.org/x/crypto` to v0.54.0, `golang.org/x/sys` to v0.47.0.
+
+### Fixed
+- Suppress benign close errors in `bidirectionalCopy`: `net.ErrClosed`, `io.ErrClosedPipe`, and `quic.ApplicationError` with code 0 are now filtered instead of being logged as errors. These are normal teardown artifacts from concurrent stream shutdown.
+
+### Changed
+- Replace `time.Sleep` with `waitForListener` in tunnel integration tests for faster, more reliable CI runs.
+
 ## [0.1.1] - 2026-06-18
 ### Security
 - Fix SPAKE2 offline dictionary oracle: independent ephemeral scalars per blinded point.
