@@ -19,7 +19,8 @@ import (
 
 // RunTunnel establishes a peer-to-peer tunnel, exchanging port-forwarding configurations
 // and starting TCP listeners for local tunnels and stream acceptors for remote tunnels.
-func RunTunnel(ctx context.Context, relayAddr, code string, localTunnels, remoteTunnels []string, allowTunnel bool) error {
+// forwardMaxStreams overrides QVOLE_FORWARD_MAX_STREAMS; 0 means use env/default.
+func RunTunnel(ctx context.Context, relayAddr, code string, localTunnels, remoteTunnels []string, allowTunnel bool, forwardMaxStreams int) error {
 	conn, isServer, err := engine.ConnectPeer(ctx, relayAddr, code)
 	if err != nil {
 		return err
@@ -68,6 +69,13 @@ func RunTunnel(ctx context.Context, relayAddr, code string, localTunnels, remote
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// Resolve the forward max streams limit (zero means use env/default).
+	fms := forwardMaxStreams
+	if fms <= 0 {
+		fms = engine.GetForwardMaxStreams()
+	}
+	initOutboundGuard(fms)
+
 	var wg sync.WaitGroup
 	var acceptorErr, listenerErr error
 
@@ -77,7 +85,7 @@ func RunTunnel(ctx context.Context, relayAddr, code string, localTunnels, remote
 			cancel()
 			wg.Done()
 		}()
-		acceptorErr = RunStreamAcceptor(ctx, conn, reqs, myReqCount, allowTunnel)
+		acceptorErr = RunStreamAcceptor(ctx, conn, reqs, myReqCount, allowTunnel, fms)
 	}()
 
 	wg.Add(1)
@@ -205,9 +213,9 @@ func writeTunnelConfig(w io.Writer, allow bool, reqs []TunnelRequest) error {
 }
 
 // RunStreamAcceptor accepts inbound QUIC streams and dispatches them to HandleTunnelStream,
-// bounded by GetForwardMaxStreams.
-func RunStreamAcceptor(ctx context.Context, conn *quic.Conn, reqs []TunnelRequest, myReqCount int, allowTunnel bool) error {
-	guard := make(chan struct{}, engine.GetForwardMaxStreams())
+// bounded by forwardMaxStreams.
+func RunStreamAcceptor(ctx context.Context, conn *quic.Conn, reqs []TunnelRequest, myReqCount int, allowTunnel bool, forwardMaxStreams int) error {
+	guard := make(chan struct{}, forwardMaxStreams)
 	for {
 		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
@@ -293,8 +301,22 @@ func RunTCPListeners(ctx context.Context, conn *quic.Conn, reqs []TunnelRequest,
 }
 
 var (
-	outboundGuard = make(chan struct{}, engine.GetForwardMaxStreams())
+	outboundGuard     chan struct{}
+	outboundGuardOnce sync.Once
 )
+
+func initOutboundGuard(n int) {
+	outboundGuardOnce.Do(func() {
+		outboundGuard = make(chan struct{}, n)
+	})
+}
+
+// getOutboundGuard returns the outbound semaphore channel, initializing it
+// lazily from GetForwardMaxStreams if initOutboundGuard was not called.
+func getOutboundGuard() chan struct{} {
+	initOutboundGuard(engine.GetForwardMaxStreams())
+	return outboundGuard
+}
 
 // HandleTunnelTCP opens a QUIC stream for a local TCP connection, writing a 2-byte
 // header with the tunnel spec index before bridging data.
@@ -307,12 +329,12 @@ func HandleTunnelTCP(ctx context.Context, conn *quic.Conn, tcpConn net.Conn, spe
 	}
 
 	select {
-	case outboundGuard <- struct{}{}:
+	case getOutboundGuard() <- struct{}{}:
 	default:
 		util.LogTunnel.PrintfWarn("Outbound stream limit reached, rejecting tunnel %d", specIdx)
 		return
 	}
-	defer func() { <-outboundGuard }()
+	defer func() { <-getOutboundGuard() }()
 
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
@@ -378,8 +400,10 @@ func HandleTunnelStream(ctx context.Context, stream *quic.Stream, reqs []TunnelR
 
 	util.LogTunnel.PrintfSuccess("Tunnel %d active: ↔ %s", idx, util.Bold(req.TargetAddr))
 
-	// Set an idle deadline on the QUIC stream before the long-lived copy
-	// so a peer that goes silent cannot hold the connection open forever.
+	// Set an absolute 5-minute lifetime cap on the QUIC stream so a peer
+	// that goes silent cannot hold the connection open indefinitely.
+	// Note: this is not a refreshing idle deadline; active streams also
+	// hit this limit.
 	stream.SetReadDeadline(time.Now().Add(streamIdleTimeout))
 	tcpConn.SetReadDeadline(time.Now().Add(streamIdleTimeout))
 	bidirectionalCopy(tcpConn, stream)

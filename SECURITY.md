@@ -91,7 +91,7 @@ purpose could be reused in another context:
 
 | Component | Entropy | Source |
 |-----------|---------|--------|
-| Generated code | ~52 bits | 10,000 × 7766³ |
+| Generated code | ~52 bits | 10,000 × 7762³ |
 | Ephemeral scalar r | 256 bits | `crypto/rand` |
 | ECDSA P-256 key | 256 bits | `crypto/rand` |
 | Confirm nonce | 128 bits | `crypto/rand` |
@@ -294,7 +294,7 @@ valid public key.
 
 **Mitigation:** SPAKE2 is PAKE-secure: without the password, the blinded points
 are indistinguishable from random group elements. The implementation uses two
-independent ephemeral scalars (`rM`, `rN`) — one per blinded point — so
+independent ephemeral scalars (`rM`, `rN`), one per blinded point, so
 subtracting the two captured points yields `(rM−rN)·G + pw·(M−N)`, which
 contains the unknown difference of two ephemeral scalars. No offline
 verification oracle exists. The attacker would need to solve the Computational
@@ -548,7 +548,9 @@ stream.
 
 #### Local Listener Exposure
 
-The `-L` listener binds to `0.0.0.0` or a user-specified address. On a multi-tenant
+The `-L` listener binds to a user-specified address (defaulting to `127.0.0.1` for both
+3-part and 4-part tunnel syntax when no host is provided). Explicit `0.0.0.0` still
+binds all interfaces. On a multi-tenant
 machine, other local processes could connect to the forward listener and tunnel
 through.
 
@@ -653,9 +655,9 @@ Go's runtime. Entropy depletion is not a practical concern on modern kernels.
 #### Code Generation Rejection Sampling
 
 `randInt` in `internal/util/code.go` uses rejection sampling to eliminate modulo bias when
-selecting from the word list (7766 words) and digit range (0-9999). A uniformly
+selecting from the word list (7762 words) and digit range (0-9999). A uniformly
 random uint16 is drawn and rejected if it falls outside the largest multiple of
-the range that fits in 65536. For 7766, the rejection probability is ~5.0%,
+the range that fits in 65536. For 7762, the rejection probability is ~5.0%,
 potentially requiring multiple `crypto/rand` reads.
 
 ---
@@ -757,7 +759,7 @@ relay's role as a lightweight, untrusted rendezvous:
 | Per-message overhead | 0 B (just payload) | 1–20 B (short-header datagram or stream frame) |
 | Typical exchange on wire | ~2,800 B across 12 messages | Handshake alone exceeds the entire exchange |
 | Relay memory per client | ~tens of bytes | ~hundreds of KB (QUIC + TLS state) |
-| Maximum relay concurrency | 500k clients (50/room at configurable limits × 10k rooms) feasible | Impractical without massive memory |
+| Maximum relay concurrency | 200k clients (20/room at configurable limits × 10k rooms) feasible | Impractical without massive memory |
 
 **Why the overhead matters:** The relay exchange is just 6 application messages
 (2 SPAKE2 + 2 confirm + 2 REG/REGD). Adding a QUIC handshake to each rendezvous
@@ -949,7 +951,7 @@ usability limitation.
 
 ### Code Entropy Ceiling
 
-The generated code has ~52 bits of entropy (10,000 × 7766³). User-provided
+The generated code has ~52 bits of entropy (10,000 × 7762³). User-provided
 codes can be up to 256 characters but the entropy is only as strong as the
 chosen code. 52 bits is sufficient against online brute-force with relay rate
 limiting, but may be marginal against a well-resourced attacker with access
@@ -1076,7 +1078,7 @@ a cosmetic limitation, not a security concern.
 | Traffic analysis identifies peers | Moderate | Loss of anonymity | Fixed message sizes |
 | Relay DoS disrupts rendezvous | High | Denial of service (no confidentiality loss) | Retry with different relay (out of band) |
 | Hole punch spoofing on shared L2 network | Low-Medium | Denial of service (IP-only port matching, first-packet-wins race); no data compromise | TLS fingerprint pinning; reconnect with new code |
-| Forward listener binds to 0.0.0.0 unintentionally | User-dependent | Local privilege escalation | Bind to 127.0.0.1 by default for `-L port:host:port` syntax |
+| Forward listener binds to 0.0.0.0 unintentionally | Low | Local privilege escalation | 3-part `-L port:host:port` defaults to 127.0.0.1; 4-part `-L :port:host:port` (empty host) also defaults to 127.0.0.1; explicit `0.0.0.0` still binds all interfaces |
 | Cryptographic break of P-256, SHA-256, or TLS 1.3 | Negligible | Full compromise | Standard model; common to all TLS-based systems |
 | Post-quantum adversary | Futuristic | Full compromise | No quantum-resistant primitives; code is not PQ-secure |
 
@@ -1138,8 +1140,8 @@ slow peers from blocking the relay.
 
 | Constant | File | Value | Purpose |
 |---|---|---|---|
-| `minCodeLen` | `cmd/qvole/main.go` | 8 | Minimum code length |
-| `maxCodeLen` | `cmd/qvole/main.go` | 256 | Maximum code length |
+| `MinCodeLen` | `qvole.go` | 8 | Minimum code length (library) |
+| `MaxCodeLen` | `qvole.go` | 256 | Maximum code length (library) |
 | `ExchangeDeadline` | `internal/engine/connect.go` | 90 s | Handshake timeout (overridable via `QVOLE_EXCHANGE_DEADLINE_MS`) |
 | `RegInterval` | `internal/engine/connect.go` | 30 s | REG re-send interval; late-joining peer may wait up to this long to be discovered |
 | `ConfirmPayloadSize` | `internal/engine/connect.go` | 160 | Fixed confirm size (incl. 32 B random padding) |
@@ -1147,12 +1149,13 @@ slow peers from blocking the relay.
 | `maxRooms` | `relay/room.go` | 10000 | Room cap |
 | `maxRoomsPerIP` | `relay/room.go` | 10 | Per-IP room cap |
 | `maxClientsHard` | `relay/room.go` | 20 | Hard cap on clients per room (abuse guard) |
+| `maxPendingPerIP` | `relay/room.go` | 50 | Per-IP cap on pending (pre-cookie) registrations |
 | `maxDatagramLen` | `relay/room.go` | 1400 | Raw UDP datagram limit |
 | `MaxIncomingUniStreams` | `internal/engine/transport.go` | 0 | No uni streams |
 | `maxTunnelRequests` | `internal/app/tunnel_request.go` | 100 | Spec count limit |
 | `streamHeaderTimeout` | `internal/app/tunnel_request.go` | 15 s | Tunnel stream header read deadline |
 | `streamConfigTimeout` | `internal/app/tunnel_request.go` | 30 s | Control stream config read deadline |
-| `ForwardMaxStreams` | `internal/engine/transport.go` | 200 | Max concurrent tunnel streams (overridable via `QVOLE_FORWARD_MAX_STREAMS`) |
+| `ForwardMaxStreams` | `internal/engine/transport.go` | 200 | Max concurrent tunnel streams (overridable via `QVOLE_FORWARD_MAX_STREAMS` or library `WithForwardMaxStreams`) |
 | `InsecureSkipVerify` | `internal/engine/transport.go` | true | Self-signed cert bypass |
 
 ---

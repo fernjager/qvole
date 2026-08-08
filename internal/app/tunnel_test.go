@@ -354,7 +354,7 @@ func TestTunnelRunStreamAcceptor_ConnectionClosed(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	err := RunStreamAcceptor(ctx, serverConn, reqs, 1, true)
+	err := RunStreamAcceptor(ctx, serverConn, reqs, 1, true, 200)
 	if err == nil {
 		t.Fatal("expected error from RunStreamAcceptor with closed connection")
 	}

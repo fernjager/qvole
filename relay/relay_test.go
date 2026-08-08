@@ -3,6 +3,7 @@ package relay
 import (
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -322,8 +323,8 @@ func TestBufferPool(t *testing.T) {
 }
 
 func TestCodeWordsQuality(t *testing.T) {
-	if len(spake2.CodeWords) != 7766 {
-		t.Fatalf("expected 7766 words, got %d", len(spake2.CodeWords))
+	if len(spake2.CodeWords) != 7762 {
+		t.Fatalf("expected 7762 words, got %d", len(spake2.CodeWords))
 	}
 	seen := make(map[string]bool, len(spake2.CodeWords))
 	for _, w := range spake2.CodeWords {
@@ -502,12 +503,19 @@ func TestHandleReg_RoomCapacityLimit(t *testing.T) {
 	defer clientConn.Close()
 	clientAddr := clientConn.LocalAddr().(*net.UDPAddr)
 
+	// Initial REG: should still get a cookie challenge (room not created
+	// yet, cap is checked at cookie completion).
 	HandlePacket(relayConn, []byte("REG "+room+"\n"), clientAddr)
+	regLine, ok := readUDPLineOrNone(t, clientConn, 500*time.Millisecond)
+	if !ok || !strings.HasPrefix(regLine, "REGD "+room+" ") {
+		t.Fatalf("expected REGD cookie challenge, got %q", regLine)
+	}
+	cookie := strings.TrimPrefix(regLine, "REGD "+room+" ")
 
-	clientConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-	buf := make([]byte, 1500)
-	_, err = clientConn.Read(buf)
-	if err == nil {
+	// Cookie completion: should be rejected because room capacity is full.
+	HandlePacket(relayConn, []byte("REG "+room+" "+cookie+"\n"), clientAddr)
+	_, ok = readUDPLineOrNone(t, clientConn, 100*time.Millisecond)
+	if ok {
 		t.Fatal("expected no REGD when room capacity reached")
 	}
 }
@@ -516,8 +524,7 @@ func TestHandleMsg_NilResolvedAddr(t *testing.T) {
 	relayConn, client1Conn, client1Addr := setupRelayConns(t)
 	room := uniqueRoom("msg-nil-addr")
 
-	HandlePacket(relayConn, []byte("REG "+room+"\n"), client1Addr)
-	readUDPLine(t, client1Conn, 500*time.Millisecond)
+	registerClient(t, relayConn, client1Conn, client1Addr, room)
 
 	client2Conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
@@ -526,8 +533,7 @@ func TestHandleMsg_NilResolvedAddr(t *testing.T) {
 	defer client2Conn.Close()
 	client2Addr := client2Conn.LocalAddr().(*net.UDPAddr)
 
-	HandlePacket(relayConn, []byte("REG "+room+"\n"), client2Addr)
-	readUDPLine(t, client2Conn, 500*time.Millisecond)
+	registerClient(t, relayConn, client2Conn, client2Addr, room)
 
 	shard := shardFor(room)
 	shard.mu.RLock()

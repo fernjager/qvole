@@ -54,14 +54,16 @@ else
 fi
 
 echo "Downloading qvole ${VERSION} for ${OS}/${ARCH}..."
-curl -fsSLo /tmp/${BIN} "$URL"
-chmod +x /tmp/${BIN}
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
+curl -fsSLo "${TMPDIR}/${BIN}" "$URL"
+chmod +x "${TMPDIR}/${BIN}"
 
 if [ -w "$INSTALL_DIR" ] || [ -w "$(dirname "$INSTALL_DIR")" ]; then
-  mv /tmp/${BIN} "$INSTALL_DIR/${BIN}"
+  mv "${TMPDIR}/${BIN}" "$INSTALL_DIR/${BIN}"
 else
   echo "Need sudo to install to ${INSTALL_DIR}:"
-  sudo mv /tmp/${BIN} "$INSTALL_DIR/${BIN}"
+  sudo mv "${TMPDIR}/${BIN}" "$INSTALL_DIR/${BIN}"
 fi
 
 if [ "$OS" = "darwin" ]; then

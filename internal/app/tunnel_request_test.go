@@ -170,6 +170,31 @@ func TestTunnelConstants(t *testing.T) {
 	}
 }
 
+func TestParseTunnelRequest_4Part_EmptyListenHost(t *testing.T) {
+	// Empty listen host in ":8080:host:80" defaults to 127.0.0.1.
+	spec, err := ParseTunnelRequest(":8080:localhost:80", "L")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if spec.ListenAddr != "127.0.0.1:8080" {
+		t.Errorf("ListenAddr = %q, want 127.0.0.1:8080", spec.ListenAddr)
+	}
+	if spec.TargetAddr != "localhost:80" {
+		t.Errorf("TargetAddr = %q, want localhost:80", spec.TargetAddr)
+	}
+}
+
+func TestParseTunnelRequest_4Part_ExplicitAllInterfaces(t *testing.T) {
+	// Explicit 0.0.0.0 should be preserved.
+	spec, err := ParseTunnelRequest("0.0.0.0:8080:localhost:80", "L")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if spec.ListenAddr != "0.0.0.0:8080" {
+		t.Errorf("ListenAddr = %q, want 0.0.0.0:8080", spec.ListenAddr)
+	}
+}
+
 func TestTunnelRequest_Struct(t *testing.T) {
 	s := TunnelRequest{Type: "L", ListenAddr: "127.0.0.1:8080", TargetAddr: "8.8.8.8:53"}
 	if s.Type != "L" {

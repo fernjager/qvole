@@ -81,6 +81,53 @@ func TestResolveOptions_EmptyCode(t *testing.T) {
 	}
 }
 
+func TestValidate_CodeLength(t *testing.T) {
+	// Empty code should be rejected.
+	o := resolveOptions([]Option{WithRelay("r:1")})
+	if err := validate(o); err == nil {
+		t.Fatal("expected error for empty code")
+	}
+
+	// Too short.
+	o = resolveOptions([]Option{WithCode("short"), WithRelay("r:1")})
+	if err := validate(o); err == nil {
+		t.Fatal("expected error for short code (7 chars)")
+	}
+
+	// Minimum length (8).
+	o = resolveOptions([]Option{WithCode("12345678"), WithRelay("r:1")})
+	if err := validate(o); err != nil {
+		t.Fatalf("unexpected error for 8-char code: %v", err)
+	}
+
+	// Maximum length (256).
+	long := make([]byte, 256)
+	for i := range long {
+		long[i] = 'a'
+	}
+	o = resolveOptions([]Option{WithCode(string(long)), WithRelay("r:1")})
+	if err := validate(o); err != nil {
+		t.Fatalf("unexpected error for 256-char code: %v", err)
+	}
+
+	// Too long.
+	long = make([]byte, 257)
+	for i := range long {
+		long[i] = 'a'
+	}
+	o = resolveOptions([]Option{WithCode(string(long)), WithRelay("r:1")})
+	if err := validate(o); err == nil {
+		t.Fatal("expected error for long code (257 chars)")
+	}
+}
+
+func TestValidate_MissingRelay(t *testing.T) {
+	o := resolveOptions([]Option{WithCode("12345678")})
+	if err := validate(o); err == nil {
+		t.Fatal("expected error for missing relay")
+	}
+}
+
 func TestWithCommand(t *testing.T) {
 	o := defaultOptions()
 	WithCommand("uptime")(o)
@@ -142,6 +189,7 @@ func TestToPeerConfig(t *testing.T) {
 	o.idleTimeout = 60 * time.Second
 	o.handshakeTimeout = 15 * time.Second
 	o.maxStreams = 50
+	o.forwardMaxStreams = 150
 
 	cfg := toPeerConfig(o)
 	if cfg.PunchTimeout != 5*time.Second {
@@ -161,6 +209,9 @@ func TestToPeerConfig(t *testing.T) {
 	}
 	if cfg.MaxStreams != 50 {
 		t.Errorf("MaxStreams = %d", cfg.MaxStreams)
+	}
+	if cfg.ForwardMaxStreams != 150 {
+		t.Errorf("ForwardMaxStreams = %d, want 150", cfg.ForwardMaxStreams)
 	}
 }
 

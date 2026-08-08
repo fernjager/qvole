@@ -129,18 +129,25 @@ func PasswordToScalar(password string) *big.Int {
 		} else {
 			var b [8]byte
 			binary.BigEndian.PutUint64(b[:], counter)
-			h = pbkdf2.Key(append(pwBytes, b[:]...), salt, kdfIterations, 32, sha256.New)
+			in := append(pwBytes, b[:]...)
+			h = pbkdf2.Key(in, salt, kdfIterations, 32, sha256.New)
+			ZeroBytes(in)
 		}
 		s := new(big.Int).SetBytes(h)
+		ZeroBytes(h)
 		s.Mod(s, Curve.Params().N)
 		if s.Sign() != 0 {
+			ZeroBytes(pwBytes)
 			return s
 		}
 	}
 }
 
 func generatorScalar(gx, gy *big.Int, scalar *big.Int) (x, y *big.Int) {
-	return Curve.ScalarMult(gx, gy, scalarBytes32(scalar))
+	sb := scalarBytes32(scalar)
+	x, y = Curve.ScalarMult(gx, gy, sb)
+	ZeroBytes(sb)
+	return
 }
 
 // scalarBytes32 returns a fixed-length 32-byte big-endian representation of s,
@@ -162,7 +169,7 @@ func scalarBytes32(s *big.Int) []byte {
 // subtracting the two blinded points does NOT cancel the ephemeral
 // contribution. If a single scalar were reused for both blinded points, an
 // observer could compute blindedM - blindedN = pw*(M-N) and verify candidate
-// passwords offline — defeating the core PAKE property.
+// passwords offline; defeating the core PAKE property.
 type State struct {
 	curve     elliptic.Curve
 	pwScalar  *big.Int
@@ -280,11 +287,15 @@ func (s *State) ComputeShared(peerBlindedBytes []byte, peerUsedM bool) ([]byte, 
 	}
 
 	var pwx, pwy *big.Int
+	var pwSB []byte
 	if peerUsedM {
-		pwx, pwy = s.curve.ScalarMult(Mx, My, scalarBytes32(s.pwScalar))
+		pwSB = scalarBytes32(s.pwScalar)
+		pwx, pwy = s.curve.ScalarMult(Mx, My, pwSB)
 	} else {
-		pwx, pwy = s.curve.ScalarMult(Nx, Ny, scalarBytes32(s.pwScalar))
+		pwSB = scalarBytes32(s.pwScalar)
+		pwx, pwy = s.curve.ScalarMult(Nx, Ny, pwSB)
 	}
+	ZeroBytes(pwSB)
 	pwyNeg := new(big.Int).Sub(s.curve.Params().P, pwy)
 	unblindedX, unblindedY := s.curve.Add(peerBlindedX, peerBlindedY, pwx, pwyNeg)
 
@@ -298,7 +309,9 @@ func (s *State) ComputeShared(peerBlindedBytes []byte, peerUsedM bool) ([]byte, 
 	if !peerUsedM {
 		myScalar = s.scalarM
 	}
-	sharedX, _ := s.curve.ScalarMult(unblindedX, unblindedY, scalarBytes32(myScalar))
+	mySB := scalarBytes32(myScalar)
+	sharedX, _ := s.curve.ScalarMult(unblindedX, unblindedY, mySB)
+	ZeroBytes(mySB)
 	if sharedX.Sign() == 0 {
 		return nil, fmt.Errorf("spake2: shared x-coordinate is zero")
 	}
@@ -313,13 +326,17 @@ func (s *State) ComputeShared(peerBlindedBytes []byte, peerUsedM bool) ([]byte, 
 }
 
 // SessionAAD returns the lexicographically-ordered concatenation of two public points.
-// Operates on public data; variable-time comparison is safe.
+// Operates on public data; variable-time comparison is safe. Returns a fresh
+// allocation so callers' slices are not mutated.
 func SessionAAD(myPoint, peerPoint []byte) []byte {
 	a, b := myPoint, peerPoint
 	if string(a) > string(b) {
 		a, b = b, a
 	}
-	return append(a, b...)
+	out := make([]byte, len(a)+len(b))
+	copy(out, a)
+	copy(out[len(a):], b)
+	return out
 }
 
 func aadWithGenerators(myPoint, peerPoint []byte) []byte {

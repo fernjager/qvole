@@ -3,6 +3,7 @@ package qvole
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 
 	"github.com/quic-go/quic-go"
@@ -14,6 +15,12 @@ import (
 
 // ProtocolVersion is the wire protocol version string (e.g. "0.1").
 const ProtocolVersion = engine.ProtocolVersion
+
+// Minimum and maximum code lengths enforced by the library.
+const (
+	MinCodeLen = 8
+	MaxCodeLen = 256
+)
 
 // BufferPool is a sync.Pool of 32 KB reusable byte buffers.
 var BufferPool = engine.BufferPool
@@ -35,12 +42,13 @@ func PutBuffer(buf []byte) { engine.PutBuffer(buf) }
 // toPeerConfig converts library options to an engine PeerConfig.
 func toPeerConfig(o *options) engine.PeerConfig {
 	return engine.PeerConfig{
-		PunchTimeout:     o.punchTimeout,
-		ExchangeDeadline: o.exchangeDeadline,
-		KeepAlivePeriod:  o.keepAlivePeriod,
-		IdleTimeout:      o.idleTimeout,
-		HandshakeTimeout: o.handshakeTimeout,
-		MaxStreams:       o.maxStreams,
+		PunchTimeout:      o.punchTimeout,
+		ExchangeDeadline:  o.exchangeDeadline,
+		KeepAlivePeriod:   o.keepAlivePeriod,
+		IdleTimeout:       o.idleTimeout,
+		HandshakeTimeout:  o.handshakeTimeout,
+		MaxStreams:        o.maxStreams,
+		ForwardMaxStreams: o.forwardMaxStreams,
 	}
 }
 
@@ -55,6 +63,12 @@ func resolveOptions(opts []Option) *options {
 func validate(o *options) error {
 	if o.code == "" {
 		return errors.New("code is required")
+	}
+	if len(o.code) < MinCodeLen {
+		return fmt.Errorf("code must be at least %d characters", MinCodeLen)
+	}
+	if len(o.code) > MaxCodeLen {
+		return fmt.Errorf("code must be at most %d characters", MaxCodeLen)
 	}
 	if o.relay == "" {
 		return errors.New("relay is required")
@@ -141,7 +155,8 @@ func Tunnel(ctx context.Context, opts ...Option) error {
 	if err := validate(o); err != nil {
 		return err
 	}
-	return app.RunTunnel(ctx, o.relay, o.code, o.localTunnels, o.remoteTunnels, o.allowTunnel)
+	cfg := toPeerConfig(o)
+	return app.RunTunnel(ctx, o.relay, o.code, o.localTunnels, o.remoteTunnels, o.allowTunnel, cfg.ForwardMaxStreams)
 }
 
 // TunnelRequest represents a single port-forwarding tunnel specification.

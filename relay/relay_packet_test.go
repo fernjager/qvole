@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"strings"
@@ -165,7 +166,7 @@ func TestHandleReg_ReRegistration(t *testing.T) {
 	relayConn, clientConn, clientAddr := setupRelayConns(t)
 	room := uniqueRoom("reg-rereg")
 	registerClient(t, relayConn, clientConn, clientAddr, room)
-	// Re-reg (no cookie — should re-issue challenge with same cookie).
+	// Re-reg (no cookie; should re-issue challenge with same cookie).
 	HandlePacket(relayConn, []byte("REG "+room+"\n"), clientAddr)
 	resp := readUDPLine(t, clientConn, 500*time.Millisecond)
 	expectPrefix := "REGD " + room + " "
@@ -855,5 +856,469 @@ func TestHandleReg_PerIPRoomLimit(t *testing.T) {
 	_, ok := readUDPLineOrNone(t, extraConn, 100*time.Millisecond)
 	if ok {
 		t.Fatal("expected no REGD when per-IP room limit reached")
+	}
+}
+
+func TestPendingReg_DoesNotCreateRoom(t *testing.T) {
+	resetRegRateLimits()
+	resetIPCounts()
+	resetRooms()
+
+	relayConn, clientConn, clientAddr := setupRelayConns(t)
+	room := uniqueRoom("pending-noroom")
+
+	// Initial REG should get a cookie challenge but NOT create a room.
+	HandlePacket(relayConn, []byte("REG "+room+"\n"), clientAddr)
+	regLine, ok := readUDPLineOrNone(t, clientConn, 500*time.Millisecond)
+	if !ok || !strings.HasPrefix(regLine, "REGD "+room+" ") {
+		t.Fatalf("expected REGD cookie challenge, got %q", regLine)
+	}
+
+	// Verify no room was created.
+	shard := shardFor(room)
+	shard.mu.RLock()
+	_, exists := shard.rooms[room]
+	shard.mu.RUnlock()
+	if exists {
+		t.Fatal("room should not exist after initial REG (deferred creation)")
+	}
+
+	// Verify totalRoomCount did not increase.
+	if n := totalRooms(); n != 0 {
+		t.Fatalf("totalRooms = %d, want 0", n)
+	}
+
+	// Verify pending registration was stored.
+	if p := getPendingReg(room, clientAddr.String()); p == nil {
+		t.Fatal("pending registration not found in store")
+	}
+}
+
+func TestPendingReg_CookieCompletionCreatesRoom(t *testing.T) {
+	resetRegRateLimits()
+	resetIPCounts()
+	resetRooms()
+
+	relayConn, clientConn, clientAddr := setupRelayConns(t)
+	room := uniqueRoom("pending-create")
+
+	// Initial REG.
+	HandlePacket(relayConn, []byte("REG "+room+"\n"), clientAddr)
+	regLine, ok := readUDPLineOrNone(t, clientConn, 500*time.Millisecond)
+	if !ok || !strings.HasPrefix(regLine, "REGD "+room+" ") {
+		t.Fatalf("expected REGD cookie challenge, got %q", regLine)
+	}
+	cookie := strings.TrimPrefix(regLine, "REGD "+room+" ")
+
+	// Cookie completion.
+	HandlePacket(relayConn, []byte("REG "+room+" "+cookie+"\n"), clientAddr)
+	regLine2, ok := readUDPLineOrNone(t, clientConn, 500*time.Millisecond)
+	if !ok || !strings.HasPrefix(regLine2, "REGD "+room+" OK ") {
+		t.Fatalf("expected REGD OK, got %q", regLine2)
+	}
+
+	// Verify room was created.
+	shard := shardFor(room)
+	shard.mu.RLock()
+	entry := shard.rooms[room]
+	shard.mu.RUnlock()
+	if entry == nil {
+		t.Fatal("room should exist after cookie completion")
+	}
+
+	// Verify client was admitted.
+	entry.mu.Lock()
+	_, admitted := entry.udpClients[clientAddr.String()]
+	entry.mu.Unlock()
+	if !admitted {
+		t.Fatal("client should be admitted after cookie completion")
+	}
+
+	// Verify totalRoomCount increased.
+	if n := totalRooms(); n != 1 {
+		t.Fatalf("totalRooms = %d, want 1", n)
+	}
+
+	// Verify pending was removed.
+	if p := getPendingReg(room, clientAddr.String()); p != nil {
+		t.Fatal("pending registration should have been removed")
+	}
+}
+
+func TestPendingReg_RoomExhaustion(t *testing.T) {
+	resetRegRateLimits()
+	resetIPCounts()
+	resetRooms()
+
+	// Save and restore state.
+	savedMaxRooms := maxRooms
+	savedMaxMsgRate := maxMsgRate
+	maxRooms = 10
+	maxMsgRate = 1000
+	savedCount := totalRoomCount.Load()
+	defer func() {
+		maxRooms = savedMaxRooms
+		maxMsgRate = savedMaxMsgRate
+		totalRoomCount.Store(savedCount)
+		resetRooms()
+		resetIPCounts()
+	}()
+
+	relayConn, _, _ := setupRelayConns(t)
+
+	// Flood initial REGs from different IPs (each on a distinct local port,
+	// but all from 127.0.0.1). None should create rooms.
+	for i := 0; i < maxRooms*3; i++ {
+		c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+		if err != nil {
+			t.Fatalf("listen client %d: %v", i, err)
+		}
+		addr := c.LocalAddr().(*net.UDPAddr)
+		room := uniqueRoom(fmt.Sprintf("exhaust-%d", i))
+		HandlePacket(relayConn, []byte("REG "+room+"\n"), addr)
+		// Drain the response.
+		_, _ = readUDPLineOrNone(t, c, 100*time.Millisecond)
+		c.Close()
+	}
+
+	// Verify that no rooms were created (room table not exhausted).
+	if n := totalRooms(); n != 0 {
+		t.Fatalf("totalRooms = %d, want 0 (rooms should not be created on initial REG)", n)
+	}
+}
+
+func TestCookieCompletion_RechecksHardCap(t *testing.T) {
+	resetRegRateLimits()
+	resetIPCounts()
+	resetRooms()
+
+	oldCap := maxClientsHard
+	maxClientsHard = 3
+	defer func() { maxClientsHard = oldCap }()
+
+	relayConn, _, _ := setupRelayConns(t)
+	room := uniqueRoom("cookie-hardcap")
+
+	// Admit one client to create the room.
+	c1, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen c1: %v", err)
+	}
+	defer c1.Close()
+	addr1 := c1.LocalAddr().(*net.UDPAddr)
+	registerClient(t, relayConn, c1, addr1, room)
+
+	// Collect cookies for 3 more clients while the room is under the hard cap.
+	type pendingClient struct {
+		conn   *net.UDPConn
+		addr   *net.UDPAddr
+		cookie string
+	}
+	var extras []pendingClient
+	for i := 0; i < 3; i++ {
+		c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+		if err != nil {
+			t.Fatalf("listen extra %d: %v", i, err)
+		}
+		defer c.Close()
+		addr := c.LocalAddr().(*net.UDPAddr)
+
+		HandlePacket(relayConn, []byte("REG "+room+"\n"), addr)
+		line, ok := readUDPLineOrNone(t, c, 500*time.Millisecond)
+		if !ok || !strings.HasPrefix(line, "REGD "+room+" ") {
+			t.Fatalf("extra %d: expected REGD cookie, got %q", i, line)
+		}
+		extras = append(extras, pendingClient{
+			conn:   c,
+			addr:   addr,
+			cookie: strings.TrimPrefix(line, "REGD "+room+" "),
+		})
+	}
+
+	// Now complete the cookies. The first two should succeed (filling the cap
+	// to 3), the third should be rejected by the re-check.
+	admitted := 0
+	for i, pc := range extras {
+		HandlePacket(relayConn, []byte("REG "+room+" "+pc.cookie+"\n"), pc.addr)
+		line, ok := readUDPLineOrNone(t, pc.conn, 500*time.Millisecond)
+		if ok && strings.HasPrefix(line, "REGD "+room+" OK ") {
+			admitted++
+		} else if admitted < maxClientsHard-1 {
+			t.Fatalf("extra %d: expected admission (admitted=%d, cap=%d)", i, admitted, maxClientsHard)
+		}
+	}
+
+	// With the re-check, at most (maxClientsHard - 1) of the extras should
+	// be admitted (plus the initial client = maxClientsHard total).
+	if admitted > maxClientsHard-1 {
+		t.Fatalf("admitted %d extras, want at most %d (hard cap re-check failed)", admitted, maxClientsHard-1)
+	}
+}
+
+func TestCookieCompletion_RechecksPerIPCap(t *testing.T) {
+	resetRegRateLimits()
+	resetIPCounts()
+	resetRooms()
+
+	savedMaxRoomsPerIP := maxRoomsPerIP
+	maxRoomsPerIP = 2
+	defer func() { maxRoomsPerIP = savedMaxRoomsPerIP }()
+
+	relayConn, _, _ := setupRelayConns(t)
+
+	// Collect cookies for 3 rooms via the pending store (rooms don't exist
+	// yet, so the initial REG goes to pending, not blocked by per-IP cap).
+	c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen c: %v", err)
+	}
+	defer c.Close()
+	addr := c.LocalAddr().(*net.UDPAddr)
+
+	type cookieInfo struct {
+		room   string
+		cookie string
+	}
+	var cookies []cookieInfo
+	for i := 0; i < 3; i++ {
+		room := uniqueRoom(fmt.Sprintf("ipcap-%d", i))
+		HandlePacket(relayConn, []byte("REG "+room+"\n"), addr)
+		line, ok := readUDPLineOrNone(t, c, 500*time.Millisecond)
+		if !ok || !strings.HasPrefix(line, "REGD "+room+" ") {
+			t.Fatalf("room %d: expected REGD cookie, got %q", i, line)
+		}
+		cookies = append(cookies, cookieInfo{
+			room:   room,
+			cookie: strings.TrimPrefix(line, "REGD "+room+" "),
+		})
+	}
+
+	// Complete first two cookies; both should succeed (IP count goes 0→1→2).
+	for i := 0; i < 2; i++ {
+		ci := cookies[i]
+		HandlePacket(relayConn, []byte("REG "+ci.room+" "+ci.cookie+"\n"), addr)
+		line, ok := readUDPLineOrNone(t, c, 500*time.Millisecond)
+		if !ok || !strings.HasPrefix(line, "REGD "+ci.room+" OK ") {
+			t.Fatalf("room %d: expected REGD OK, got %q", i, line)
+		}
+	}
+
+	// Complete third cookie; should be rejected because IP is at cap (2).
+	ci := cookies[2]
+	HandlePacket(relayConn, []byte("REG "+ci.room+" "+ci.cookie+"\n"), addr)
+	_, ok := readUDPLineOrNone(t, c, 100*time.Millisecond)
+	if ok {
+		t.Fatal("expected third cookie completion to be rejected at per-IP cap")
+	}
+}
+
+func TestCookieCompletion_RechecksPerIPCap_ExistingRoom(t *testing.T) {
+	resetRegRateLimits()
+	resetIPCounts()
+	resetRooms()
+
+	savedMaxRoomsPerIP := maxRoomsPerIP
+	maxRoomsPerIP = 2
+	defer func() { maxRoomsPerIP = savedMaxRoomsPerIP }()
+
+	relayConn, caConn, caAddr := setupRelayConns(t)
+
+	// Client B is a distinct (unroutable) source IP; responses to it are not
+	// observed, so its cookies are read from the pending store instead.
+	fakeIP := "10.99.99.99"
+	bAddr := &net.UDPAddr{IP: net.ParseIP(fakeIP), Port: 4242}
+	bSrc := bAddr.String()
+
+	roomX := uniqueRoom("ipcapx")
+	roomY := uniqueRoom("ipcapy")
+	roomZ := uniqueRoom("ipcapz")
+
+	// B pre-registers X, Y, Z via the pending store (none exist yet).
+	var cookies []string
+	for _, room := range []string{roomX, roomY, roomZ} {
+		HandlePacket(relayConn, []byte("REG "+room+"\n"), bAddr)
+		p := getPendingReg(room, bSrc)
+		if p == nil {
+			t.Fatalf("room %s: expected pending registration for %s", room, bSrc)
+		}
+		cookies = append(cookies, hex.EncodeToString(p.cookie))
+	}
+
+	// Client A (127.0.0.1) creates room X via the pending store.
+	registerClient(t, relayConn, caConn, caAddr, roomX)
+
+	// B completes Y and Z; both create rooms, putting B's IP at cap (2).
+	for i, room := range []string{roomY, roomZ} {
+		HandlePacket(relayConn, []byte("REG "+room+" "+cookies[i+1]+"\n"), bAddr)
+		if n := countIPRooms(fakeIP); n != i+1 {
+			t.Fatalf("after completing %s: countIPRooms(%s) = %d, want %d", room, fakeIP, n, i+1)
+		}
+	}
+
+	// B completes X; room exists (created by A), B's IP is at cap and not in
+	// the room, so the exists-branch per-IP re-check must reject it.
+	HandlePacket(relayConn, []byte("REG "+roomX+" "+cookies[0]+"\n"), bAddr)
+	if n := countIPRooms(fakeIP); n != maxRoomsPerIP {
+		t.Fatalf("countIPRooms(%s) = %d after rejected completion, want %d (per-IP cap bypassed)", fakeIP, n, maxRoomsPerIP)
+	}
+	sh := shardFor(roomX)
+	sh.mu.RLock()
+	entry, ok := sh.rooms[roomX]
+	sh.mu.RUnlock()
+	if !ok {
+		t.Fatalf("room %s disappeared", roomX)
+	}
+	entry.mu.Lock()
+	_, admitted := entry.udpClients[bSrc]
+	nClients := len(entry.udpClients)
+	entry.mu.Unlock()
+	if admitted {
+		t.Fatalf("client %s was admitted into existing room %s despite per-IP cap", bSrc, roomX)
+	}
+
+	// Room X must remain usable: client C (same IP as A, already in room X)
+	// completes its cookie and is admitted.
+	ccConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen cc: %v", err)
+	}
+	defer ccConn.Close()
+	ccAddr := ccConn.LocalAddr().(*net.UDPAddr)
+	HandlePacket(relayConn, []byte("REG "+roomX+"\n"), ccAddr)
+	lineC, ok := readUDPLineOrNone(t, ccConn, 500*time.Millisecond)
+	if !ok || !strings.HasPrefix(lineC, "REGD "+roomX+" ") {
+		t.Fatalf("client C: expected REGD cookie, got %q", lineC)
+	}
+	cookieC := strings.TrimPrefix(lineC, "REGD "+roomX+" ")
+	HandlePacket(relayConn, []byte("REG "+roomX+" "+cookieC+"\n"), ccAddr)
+	lineC2, ok := readUDPLineOrNone(t, ccConn, 500*time.Millisecond)
+	if !ok || !strings.HasPrefix(lineC2, "REGD "+roomX+" OK ") {
+		t.Fatalf("client C: expected REGD OK, got %q", lineC2)
+	}
+	entry.mu.Lock()
+	after := len(entry.udpClients)
+	entry.mu.Unlock()
+	if after != nClients+1 {
+		t.Fatalf("room %s has %d clients after C joined, want %d", roomX, after, nClients+1)
+	}
+}
+
+func TestCookieReg_UnknownRoom_Rechallenged(t *testing.T) {
+	resetRegRateLimits()
+	resetIPCounts()
+	resetRooms()
+
+	relayConn, c, addr := setupRelayConns(t)
+
+	room := uniqueRoom("rechal")
+	// Initial REG → pending store + challenge.
+	HandlePacket(relayConn, []byte("REG "+room+"\n"), addr)
+	line1, ok := readUDPLineOrNone(t, c, 500*time.Millisecond)
+	if !ok || !strings.HasPrefix(line1, "REGD "+room+" ") {
+		t.Fatalf("expected REGD cookie, got %q", line1)
+	}
+	cookie1 := strings.TrimPrefix(line1, "REGD "+room+" ")
+
+	// Evict the pending entry, simulating pendingRegTTL expiry.
+	removeStalePendingRegs(time.Now().Add(time.Hour))
+
+	// Cookie REG for the now-unknown room must be re-challenged, not dropped.
+	HandlePacket(relayConn, []byte("REG "+room+" "+cookie1+"\n"), addr)
+	line2, ok := readUDPLineOrNone(t, c, 500*time.Millisecond)
+	if !ok || !strings.HasPrefix(line2, "REGD "+room+" ") {
+		t.Fatalf("expected re-challenge for unknown room, got %q", line2)
+	}
+	if strings.HasPrefix(line2, "REGD "+room+" OK ") {
+		t.Fatal("expected a fresh cookie challenge, not admission")
+	}
+	cookie2 := strings.TrimPrefix(line2, "REGD "+room+" ")
+
+	// Completing with the fresh cookie creates the room and admits the client.
+	HandlePacket(relayConn, []byte("REG "+room+" "+cookie2+"\n"), addr)
+	line3, ok := readUDPLineOrNone(t, c, 500*time.Millisecond)
+	if !ok || !strings.HasPrefix(line3, "REGD "+room+" OK ") {
+		t.Fatalf("expected REGD OK after re-challenge, got %q", line3)
+	}
+}
+
+func TestPendingReg_Cleanup(t *testing.T) {
+	resetRegRateLimits()
+	resetIPCounts()
+	resetRooms()
+
+	oldTTL := regTTL
+	oldPendingTTL := pendingRegTTL
+	regTTL = 50 * time.Millisecond
+	// We can't change the const, but we can test that stale pending is removed
+	// by directly manipulating the timestamps.
+	defer func() {
+		regTTL = oldTTL
+		_ = oldPendingTTL
+	}()
+
+	room := uniqueRoom("pending-cleanup")
+	sh := pendingShardFor(room)
+
+	// Store a pending registration with an old timestamp.
+	storePendingReg(room, "1.2.3.4:5678", &pendingReg{
+		cookie:       []byte("deadbeefdeadbeef"),
+		createdAt:    time.Now().Add(-2 * pendingRegTTL),
+		resolvedAddr: &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 5678},
+	})
+
+	// Verify it exists.
+	if p := getPendingReg(room, "1.2.3.4:5678"); p == nil {
+		t.Fatal("pending registration should exist before cleanup")
+	}
+
+	// Run cleanup.
+	removeStalePendingRegs(time.Now())
+
+	// Verify it was removed.
+	sh.mu.Lock()
+	_, exists := sh.regs[room]
+	sh.mu.Unlock()
+	if exists {
+		t.Fatal("stale pending registration should have been evicted")
+	}
+}
+
+func TestPendingReg_PerIPLimit(t *testing.T) {
+	resetRegRateLimits()
+	resetIPCounts()
+	resetRooms()
+
+	savedMaxPendingPerIP := maxPendingPerIP
+	maxPendingPerIP = 2
+	defer func() { maxPendingPerIP = savedMaxPendingPerIP }()
+
+	relayConn, _, _ := setupRelayConns(t)
+
+	// Fill pending per-IP limit.
+	for i := 0; i < maxPendingPerIP; i++ {
+		c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+		if err != nil {
+			t.Fatalf("listen client %d: %v", i, err)
+		}
+		addr := c.LocalAddr().(*net.UDPAddr)
+		room := uniqueRoom(fmt.Sprintf("pend-limit-%d", i))
+		HandlePacket(relayConn, []byte("REG "+room+"\n"), addr)
+		_, _ = readUDPLineOrNone(t, c, 100*time.Millisecond)
+		c.Close()
+	}
+
+	// Third pending should be rejected.
+	extraConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen extra: %v", err)
+	}
+	defer extraConn.Close()
+	extraAddr := extraConn.LocalAddr().(*net.UDPAddr)
+
+	extraRoom := uniqueRoom("pend-limit-extra")
+	HandlePacket(relayConn, []byte("REG "+extraRoom+"\n"), extraAddr)
+	_, ok := readUDPLineOrNone(t, extraConn, 100*time.Millisecond)
+	if ok {
+		t.Fatal("expected no REGD when pending per-IP limit reached")
 	}
 }

@@ -308,6 +308,24 @@ func TestGetForwardMaxStreams_Zero(t *testing.T) {
 	}
 }
 
+func TestGetForwardMaxStreams_Override(t *testing.T) {
+	os.Unsetenv("QVOLE_FORWARD_MAX_STREAMS")
+	n := GetForwardMaxStreams(50)
+	if n != 50 {
+		t.Fatalf("expected override 50, got %d", n)
+	}
+}
+
+func TestGetForwardMaxStreams_OverrideZero(t *testing.T) {
+	os.Setenv("QVOLE_FORWARD_MAX_STREAMS", "300")
+	defer os.Unsetenv("QVOLE_FORWARD_MAX_STREAMS")
+	// Zero override should fall through to env.
+	n := GetForwardMaxStreams(0)
+	if n != 300 {
+		t.Fatalf("expected env 300 for zero override, got %d", n)
+	}
+}
+
 func TestCloseOnCancel(t *testing.T) {
 	cert, err := util.GenerateSelfSignedCert("test")
 	if err != nil {

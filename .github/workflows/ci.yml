@@ -50,7 +50,5 @@ jobs:
                         FuzzEncryptDecrypt FuzzGenerateCode FuzzHandlePacket \
                         FuzzDecryptMetadata FuzzComputeShared FuzzVerifyConfirm; do
             echo "--- $target ---"
-            exit_code=0
-            go test -fuzz="$target" -fuzztime=30s -run="^$" ./cmd/qvole/ || exit_code=$?
-            if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 1 ]; then exit "$exit_code"; fi
+            go test -fuzz="$target" -fuzztime=30s -run="^$" ./cmd/qvole/
           done

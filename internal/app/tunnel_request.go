@@ -112,7 +112,11 @@ func ParseTunnelRequest(spec, typ string) (*TunnelRequest, error) {
 		listenAddr = net.JoinHostPort("127.0.0.1", parts[0])
 		targetAddr = net.JoinHostPort(stripBrackets(parts[1]), parts[2])
 	case 4:
-		listenAddr = net.JoinHostPort(stripBrackets(parts[0]), parts[1])
+		listenHost := stripBrackets(parts[0])
+		if listenHost == "" {
+			listenHost = "127.0.0.1"
+		}
+		listenAddr = net.JoinHostPort(listenHost, parts[1])
 		targetAddr = net.JoinHostPort(stripBrackets(parts[2]), parts[3])
 	default:
 		return nil, fmt.Errorf("expected [addr:]port:host:port format")

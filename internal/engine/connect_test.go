@@ -545,6 +545,34 @@ func TestProcessSpakeMsg_Success(t *testing.T) {
 	_ = isServer
 }
 
+func TestProcessSpakeMsg_ReflectedPoint(t *testing.T) {
+	password := "test-reflected-point"
+	myState, err := spake2.NewState(password)
+	if err != nil {
+		t.Fatalf("my state: %v", err)
+	}
+	myPointM := myState.BlindedBytesM()
+	myPointN := myState.BlindedBytesN()
+
+	// Build a payload where the peer's M point equals our own M point
+	// (reflection / self-echo attack).
+	peerFingerprint := make([]byte, 32)
+	if _, err := rand.Read(peerFingerprint); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+
+	payload := make([]byte, 0, spake2PayloadLen)
+	payload = append(payload, myPointM...) // reflected M point
+	payload = append(payload, myPointN...) // reflected N point
+	payload = append(payload, peerFingerprint...)
+	hexBody := hex.EncodeToString(payload)
+
+	_, _, _, _, _, _, err = processSpakeMsg(hexBody, myState, myPointM, myPointN)
+	if err == nil {
+		t.Fatal("expected error for reflected point, got nil")
+	}
+}
+
 // ---- buildConfirmPayload tests ----
 
 func TestBuildConfirmPayload_Size(t *testing.T) {

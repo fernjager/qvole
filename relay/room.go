@@ -26,6 +26,11 @@ const (
 	defaultRelayWorkers       = 4
 	defaultMaxClientsHard     = 20
 
+	// maxPendingPerIP caps the number of pending (pre-cookie) registrations
+	// allowed per source IP across all rooms. This prevents a single IP from
+	// flooding the pending store with cookie challenges for non-existent rooms.
+	defaultMaxPendingPerIP = 50
+
 	// maxRegShardEntries is a hard cap on rate-limit map entries per
 	// shard. Under a source-IP flood, entries accumulate fast; this cap
 	// prevents unbounded memory growth.
@@ -42,6 +47,7 @@ var (
 	regTTL             time.Duration = defaultRegTTL
 	relayWorkers       int           = defaultRelayWorkers
 	maxClientsHard     int           = defaultMaxClientsHard
+	maxPendingPerIP    int           = defaultMaxPendingPerIP
 )
 
 type rateLimiter struct {
@@ -103,11 +109,20 @@ type ipCountShard struct {
 	rooms map[string]map[string]struct{}
 }
 
+// pendingStoreShard holds pre-cookie registrations for rooms that do not yet
+// exist. Rooms are only created when the cookie handshake completes, preventing
+// room-table exhaustion from spoofed initial REGs.
+type pendingStoreShard struct {
+	mu   sync.Mutex
+	regs map[string]map[string]*pendingReg // room -> srcStr -> pendingReg
+}
+
 var (
 	shards         [numShards]roomShard
 	regShards      [numRegShards]regLimitShard
 	totalRoomCount atomic.Int64
 	ipCounts       [numShards]ipCountShard
+	pendingRegs    [numShards]pendingStoreShard
 
 	statRegs  atomic.Int64
 	statMsgs  atomic.Int64
@@ -151,6 +166,7 @@ func init() {
 	maxRoomsPerIP = util.EnvInt("QVOLE_RELAY_MAX_ROOMS_PER_IP", defaultMaxRoomsPerIP)
 	maxClientsHard = util.EnvInt("QVOLE_RELAY_MAX_CLIENTS_HARD", defaultMaxClientsHard)
 	maxMsgRate = util.EnvInt("QVOLE_RELAY_MSG_RATE", defaultMaxMsgRate)
+	maxPendingPerIP = util.EnvInt("QVOLE_RELAY_MAX_PENDING_PER_IP", defaultMaxPendingPerIP)
 	rateWindow = util.EnvDuration("QVOLE_RELAY_RATE_WINDOW_MS", defaultRateWindow)
 	regCleanupInterval = util.EnvDuration("QVOLE_RELAY_CLEANUP_INTERVAL_MS", defaultRegCleanupInterval)
 	regTTL = util.EnvDuration("QVOLE_RELAY_TTL_MS", defaultRegTTL)
@@ -166,6 +182,9 @@ func init() {
 	for i := range ipCounts {
 		ipCounts[i].rooms = make(map[string]map[string]struct{})
 	}
+	for i := range pendingRegs {
+		pendingRegs[i].regs = make(map[string]map[string]*pendingReg)
+	}
 }
 
 func shardIdx(key string, n uint32) uint32 {
@@ -177,6 +196,9 @@ func shardIdx(key string, n uint32) uint32 {
 func shardFor(room string) *roomShard         { return &shards[shardIdx(room, numShards)] }
 func regShardFor(src string) *regLimitShard   { return &regShards[shardIdx(src, numRegShards)] }
 func ipCountShardFor(ip string) *ipCountShard { return &ipCounts[shardIdx(ip, numShards)] }
+func pendingShardFor(room string) *pendingStoreShard {
+	return &pendingRegs[shardIdx(room, numShards)]
+}
 
 func ipKey(src string) string {
 	host, _, err := net.SplitHostPort(src)
@@ -325,6 +347,7 @@ func resetRooms() {
 		sh.mu.Unlock()
 	}
 	totalRoomCount.Store(0)
+	resetPendingRegs()
 }
 
 func countIPRooms(ip string) int {
@@ -332,6 +355,92 @@ func countIPRooms(ip string) int {
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	return len(sh.rooms[ip])
+}
+
+// --- Pending registration store (pre-cookie, no room created yet) ---
+
+func storePendingReg(room, srcStr string, p *pendingReg) {
+	sh := pendingShardFor(room)
+	sh.mu.Lock()
+	if sh.regs[room] == nil {
+		sh.regs[room] = make(map[string]*pendingReg)
+	}
+	sh.regs[room][srcStr] = p
+	sh.mu.Unlock()
+}
+
+func getPendingReg(room, srcStr string) *pendingReg {
+	sh := pendingShardFor(room)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	rm, ok := sh.regs[room]
+	if !ok {
+		return nil
+	}
+	return rm[srcStr]
+}
+
+func deletePendingReg(room, srcStr string) {
+	sh := pendingShardFor(room)
+	sh.mu.Lock()
+	rm, ok := sh.regs[room]
+	if !ok {
+		sh.mu.Unlock()
+		return
+	}
+	delete(rm, srcStr)
+	if len(rm) == 0 {
+		delete(sh.regs, room)
+	}
+	sh.mu.Unlock()
+}
+
+// countPendingForIP returns the number of pending registrations across all
+// rooms for the given IP.
+func countPendingForIP(ip string) int {
+	total := 0
+	for i := range pendingRegs {
+		sh := &pendingRegs[i]
+		sh.mu.Lock()
+		for _, rm := range sh.regs {
+			for srcStr := range rm {
+				if ipKey(srcStr) == ip {
+					total++
+				}
+			}
+		}
+		sh.mu.Unlock()
+	}
+	return total
+}
+
+// removeStalePendingRegs evicts pending registrations older than pendingRegTTL
+// from the global pending store. Called during periodic cleanup.
+func removeStalePendingRegs(now time.Time) {
+	for i := range pendingRegs {
+		sh := &pendingRegs[i]
+		sh.mu.Lock()
+		for room, rm := range sh.regs {
+			for srcStr, p := range rm {
+				if now.Sub(p.createdAt) > pendingRegTTL {
+					delete(rm, srcStr)
+				}
+			}
+			if len(rm) == 0 {
+				delete(sh.regs, room)
+			}
+		}
+		sh.mu.Unlock()
+	}
+}
+
+func resetPendingRegs() {
+	for i := range pendingRegs {
+		sh := &pendingRegs[i]
+		sh.mu.Lock()
+		sh.regs = make(map[string]map[string]*pendingReg)
+		sh.mu.Unlock()
+	}
 }
 
 func (entry *roomEntry) removeStaleClients(room string, now time.Time) {
@@ -410,6 +519,7 @@ func cleanupRegs(ctx context.Context) {
 				evictStaleRooms(shard)
 				shard.mu.Unlock()
 			}
+			removeStalePendingRegs(time.Now())
 		}
 	}
 }
