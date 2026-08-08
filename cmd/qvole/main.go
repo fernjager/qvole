@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strings"
 
+	"github.com/fernjager/qvole"
 	"github.com/fernjager/qvole/internal/app"
 	"github.com/fernjager/qvole/internal/engine"
 	"github.com/fernjager/qvole/internal/util"
@@ -18,13 +19,11 @@ import (
 )
 
 const (
-	minCodeLen        = 8
-	maxCodeLen        = 256
 	defaultRelayAddr  = "relay.qvole.dev:9009"
 	defaultListenAddr = ":9009"
 )
 
-var version = "0.1.0"
+var version = "0.1.3"
 var debug bool
 
 func main() {
@@ -79,11 +78,11 @@ func resolveCode(flagVal string) (string, error) {
 	if flagVal == "" {
 		return "", nil
 	}
-	if len(flagVal) < minCodeLen {
-		return "", fmt.Errorf("code is too short (%d chars); minimum is %d", len(flagVal), minCodeLen)
+	if len(flagVal) < qvole.MinCodeLen {
+		return "", fmt.Errorf("code is too short (%d chars); minimum is %d", len(flagVal), qvole.MinCodeLen)
 	}
-	if len(flagVal) > maxCodeLen {
-		return "", fmt.Errorf("code exceeds maximum length of %d characters", maxCodeLen)
+	if len(flagVal) > qvole.MaxCodeLen {
+		return "", fmt.Errorf("code exceeds maximum length of %d characters", qvole.MaxCodeLen)
 	}
 	return flagVal, nil
 }
@@ -226,7 +225,7 @@ func runTunnel(args []string) {
 	ctx, cancel := signalContext()
 	defer cancel()
 
-	maybeFatal(util.LogTunnel, app.RunTunnel(ctx, relayAddr, finalCode, localTunnels, remoteTunnels, *allowTunnel))
+	maybeFatal(util.LogTunnel, app.RunTunnel(ctx, relayAddr, finalCode, localTunnels, remoteTunnels, *allowTunnel, 0))
 }
 
 func printUsage() {

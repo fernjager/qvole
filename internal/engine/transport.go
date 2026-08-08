@@ -87,8 +87,12 @@ func resolveInt(val int, envName string, def int) int {
 }
 
 // GetForwardMaxStreams returns the maximum number of concurrent forward streams,
-// configurable via QVOLE_FORWARD_MAX_STREAMS.
-func GetForwardMaxStreams() int {
+// configurable via QVOLE_FORWARD_MAX_STREAMS. An optional override value can be
+// passed (from PeerConfig.ForwardMaxStreams); a non-zero override takes precedence.
+func GetForwardMaxStreams(override ...int) int {
+	if len(override) > 0 && override[0] > 0 {
+		return override[0]
+	}
 	return util.EnvInt("QVOLE_FORWARD_MAX_STREAMS", defaultForwardMaxStreams)
 }
 

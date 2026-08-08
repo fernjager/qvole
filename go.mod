@@ -3,7 +3,7 @@ module github.com/fernjager/qvole
 go 1.26.5
 
 require (
-	github.com/quic-go/quic-go v0.60.0
+	github.com/quic-go/quic-go v0.61.0
 	golang.org/x/crypto v0.54.0
 )
 

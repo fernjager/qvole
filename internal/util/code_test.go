@@ -8,8 +8,8 @@ import (
 )
 
 func TestCodeWords_Count(t *testing.T) {
-	if len(spake2.CodeWords) != 7766 {
-		t.Fatalf("expected 7766 words, got %d", len(spake2.CodeWords))
+	if len(spake2.CodeWords) != 7762 {
+		t.Fatalf("expected 7762 words, got %d", len(spake2.CodeWords))
 	}
 }
 

@@ -891,6 +891,6 @@ func TestSPAKE2_NoOfflineOracle(t *testing.T) {
 	correctScalar := PasswordToScalar(correctPassword)
 	correctX, correctY := Curve.ScalarMult(tX, tY, scalarBytes32(correctScalar))
 	if correctX.Cmp(deltaX) == 0 && correctY.Cmp(deltaY) == 0 {
-		t.Fatal("correct password matched delta — single-scalar regression?")
+		t.Fatal("correct password matched delta; single-scalar regression?")
 	}
 }

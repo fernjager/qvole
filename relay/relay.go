@@ -197,7 +197,7 @@ func writeRelay(conn *net.UDPConn, msg []byte, addr *net.UDPAddr) error {
 		}()
 		return nil
 	}
-	// Direct write (tests — writePool is nil).
+	// Direct write (tests; writePool is nil).
 	writeMu.Lock()
 	conn.SetWriteDeadline(time.Now().Add(writeDeadline))
 	_, err := conn.WriteTo(msg, addr)
@@ -238,7 +238,7 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 	srcStr := src.String()
 	srcIP := ipKey(srcStr)
 
-	// If a cookie is present, this is the follow-up REG — verify it
+	// If a cookie is present, this is the follow-up REG; verify it
 	// against the pending entry to prove return routability.
 	if len(cookie) > 0 {
 		if !isValidHex(string(cookie)) || len(cookie) != pendingCookieBytes*2 {
@@ -250,12 +250,130 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 			dropPacket(src, "Dropped REG with invalid cookie hex from %s", srcStr)
 			return
 		}
+
+		// Check the global pending store first; these are pre-cookie
+		// registrations for rooms that don't exist yet.
+		if pend := getPendingReg(room, srcStr); pend != nil {
+			if !bytes.Equal(pend.cookie, cookieBytes) {
+				dropPacket(src, "Dropped REG with mismatched cookie from %s in room %s (pending store)", srcStr, room)
+				return
+			}
+			// Cookie matches. Remove from pending store and admit the client,
+			// creating the room if necessary.
+			deletePendingReg(room, srcStr)
+
+			shard := shardFor(room)
+			shard.mu.Lock()
+			entry, ok := shard.rooms[room]
+			if !ok {
+				// Room doesn't exist yet; create it, re-checking all caps.
+				if totalRooms() >= maxRooms {
+					if n := evictStaleRooms(shard); n > 0 {
+						util.LogRelay.PrintfWarn("Evicted %d stale room(s)", n)
+					}
+				}
+				if totalRooms() >= maxRooms {
+					shard.mu.Unlock()
+					dropPacket(src, "Room %s rejected: max rooms reached (cookie completion)", room)
+					return
+				}
+				if countIPRooms(srcIP) >= maxRoomsPerIP {
+					shard.mu.Unlock()
+					dropPacket(src, "Room limit per IP reached for %s (cookie completion)", srcStr)
+					return
+				}
+				entry = &roomEntry{
+					udpClients: map[string]*udpClient{
+						srcStr: {
+							lastSeen:     time.Now(),
+							rateLimiter:  rateLimiter{windowStart: time.Now()},
+							resolvedAddr: pend.resolvedAddr,
+						},
+					},
+					t: time.Now(),
+				}
+				shard.rooms[room] = entry
+				totalRoomCount.Add(1)
+				addIPRoom(srcIP, room)
+				statRegs.Add(1)
+				util.LogRelay.Printf("Client %s joined room %s (created)", srcStr, room)
+				shard.mu.Unlock()
+				sendREGD(conn, room, src)
+				return
+			}
+			// Room already exists (created by another pending that completed
+			// first). Check caps before admitting.
+			shard.mu.Unlock()
+			entry.mu.Lock()
+			ipAlreadyInRoom := false
+			for addr := range entry.udpClients {
+				if ipKey(addr) == srcIP {
+					ipAlreadyInRoom = true
+					break
+				}
+			}
+			if len(entry.udpClients) >= maxClientsHard && entry.udpClients[srcStr] == nil {
+				entry.mu.Unlock()
+				dropPacket(src, "Room %s at hard cap (%d), rejecting %s (cookie completion)", room, maxClientsHard, srcStr)
+				return
+			}
+			if !ipAlreadyInRoom && countIPRooms(srcIP) >= maxRoomsPerIP {
+				entry.mu.Unlock()
+				dropPacket(src, "Room limit per IP reached for %s (cookie completion)", srcStr)
+				return
+			}
+			u := &udpClient{
+				lastSeen:     time.Now(),
+				rateLimiter:  rateLimiter{windowStart: time.Now()},
+				resolvedAddr: pend.resolvedAddr,
+			}
+			entry.udpClients[srcStr] = u
+			entry.t = time.Now()
+			if !ipAlreadyInRoom {
+				addIPRoom(srcIP, room)
+			}
+			statRegs.Add(1)
+			util.LogRelay.Printf("Client %s joined room %s (cookie completion)", srcStr, room)
+			entry.mu.Unlock()
+			sendREGD(conn, room, src)
+			return
+		}
+
+		// Not in pending store; check existing rooms.
 		shard := shardFor(room)
 		shard.mu.RLock()
 		entry, ok := shard.rooms[room]
 		shard.mu.RUnlock()
 		if !ok {
-			dropPacket(src, "Dropped REG cookie for unknown room %s from %s", room, srcStr)
+			// The room doesn't exist: the pending registration for this cookie
+			// expired (pendingRegTTL) or was evicted. Re-issue a fresh
+			// challenge via the pending store instead of dropping, so a client
+			// whose handshake outlived the pending entry can still complete.
+			// No room is created here, so this can't be abused to inflate the
+			// room table; the same caps as an initial REG apply.
+			if isRegRateLimited(srcIP) {
+				dropPacket(src, "Rate-limited REG from %s", srcStr)
+				return
+			}
+			if countIPRooms(srcIP) >= maxRoomsPerIP {
+				dropPacket(src, "Room limit per IP reached for %s", srcStr)
+				return
+			}
+			if countPendingForIP(srcIP) >= maxPendingPerIP {
+				dropPacket(src, "Pending limit per IP reached for %s", srcStr)
+				return
+			}
+			cb := make([]byte, pendingCookieBytes)
+			if _, err := rand.Read(cb); err != nil {
+				util.LogRelay.PrintfWarn("rand cookie failed: %v", err)
+				return
+			}
+			storePendingReg(room, srcStr, &pendingReg{
+				cookie:       cb,
+				createdAt:    time.Now(),
+				resolvedAddr: src,
+			})
+			sendRegChallenge(conn, room, cb, src)
 			return
 		}
 		entry.mu.Lock()
@@ -265,26 +383,47 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 			dropPacket(src, "Dropped REG with mismatched cookie from %s in room %s", srcStr, room)
 			return
 		}
-		// Cookie matches — admit the client.
+		// Cookie matches; admit the client, re-checking caps.
+		if len(entry.udpClients) >= maxClientsHard && entry.udpClients[srcStr] == nil {
+			entry.mu.Unlock()
+			dropPacket(src, "Room %s at hard cap (%d), rejecting %s (cookie admission)", room, maxClientsHard, srcStr)
+			return
+		}
+		if entry.udpClients[srcStr] == nil {
+			ipAlreadyInRoom := false
+			for addr := range entry.udpClients {
+				if ipKey(addr) == srcIP {
+					ipAlreadyInRoom = true
+					break
+				}
+			}
+			if !ipAlreadyInRoom && countIPRooms(srcIP) >= maxRoomsPerIP {
+				entry.mu.Unlock()
+				dropPacket(src, "Room limit per IP reached for %s (cookie admission)", srcStr)
+				return
+			}
+		}
 		delete(entry.pending, srcStr)
 		u := &udpClient{
 			lastSeen:     time.Now(),
 			rateLimiter:  rateLimiter{windowStart: time.Now()},
 			resolvedAddr: pend.resolvedAddr,
 		}
+		wasReReg := entry.udpClients[srcStr] != nil
 		entry.udpClients[srcStr] = u
 		entry.t = time.Now()
 
-		myIP := srcIP
-		ipAlreadyInRoom := false
-		for addr := range entry.udpClients {
-			if addr != srcStr && ipKey(addr) == myIP {
-				ipAlreadyInRoom = true
-				break
+		if !wasReReg {
+			ipAlreadyInRoom := false
+			for addr := range entry.udpClients {
+				if addr != srcStr && ipKey(addr) == srcIP {
+					ipAlreadyInRoom = true
+					break
+				}
 			}
-		}
-		if !ipAlreadyInRoom {
-			addIPRoom(myIP, room)
+			if !ipAlreadyInRoom {
+				addIPRoom(srcIP, room)
+			}
 		}
 		statRegs.Add(1)
 		util.LogRelay.Printf("Client %s joined room %s", srcStr, room)
@@ -310,38 +449,26 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 	shard.mu.Lock()
 	entry, ok := shard.rooms[room]
 	if !ok {
-		if totalRooms() >= maxRooms {
-			if n := evictStaleRooms(shard); n > 0 {
-				util.LogRelay.PrintfWarn("Evicted %d stale room(s)", n)
-			}
-		}
-		if totalRooms() >= maxRooms {
-			shard.mu.Unlock()
-			dropPacket(src, "Room %s rejected: max rooms reached (room)", room)
+		// Room does not exist. Store a pending registration instead of
+		// creating the room immediately. This prevents room-table exhaustion
+		// from spoofed source IPs.
+		shard.mu.Unlock()
+
+		if countPendingForIP(srcIP) >= maxPendingPerIP {
+			dropPacket(src, "Pending limit per IP reached for %s", srcStr)
 			return
 		}
-		if countIPRooms(srcIP) >= maxRoomsPerIP {
-			shard.mu.Unlock()
-			dropPacket(src, "Room limit per IP reached for %s (re-check)", srcStr)
-			return
-		}
-		// Generate a cookie for this pending registration.
+
 		cb := make([]byte, pendingCookieBytes)
 		if _, err := rand.Read(cb); err != nil {
-			shard.mu.Unlock()
 			util.LogRelay.PrintfWarn("rand cookie failed: %v", err)
 			return
 		}
-		entry = &roomEntry{
-			udpClients: make(map[string]*udpClient),
-			pending: map[string]*pendingReg{
-				srcStr: {cookie: cb, createdAt: time.Now(), resolvedAddr: src},
-			},
-			t: time.Now(),
-		}
-		shard.rooms[room] = entry
-		totalRoomCount.Add(1)
-		shard.mu.Unlock()
+		storePendingReg(room, srcStr, &pendingReg{
+			cookie:       cb,
+			createdAt:    time.Now(),
+			resolvedAddr: src,
+		})
 		sendRegChallenge(conn, room, cb, src)
 		return
 	}
@@ -367,7 +494,7 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 		return
 	}
 
-	// Check for existing pending registration — re-issue the same cookie.
+	// Check for existing pending registration; re-issue the same cookie.
 	if pend, exists := entry.pending[srcStr]; exists {
 		pend.createdAt = time.Now()
 		pend.resolvedAddr = src

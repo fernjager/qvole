@@ -15,16 +15,17 @@ import (
 // PeerConfig holds optional overrides for connection parameters.
 // Zero-value fields fall back to environment variables or built-in defaults.
 type PeerConfig struct {
-	PunchTimeout     time.Duration
-	ExchangeDeadline time.Duration
-	Spake2Resend     time.Duration
-	ConfirmResend    time.Duration
-	ReadDeadline     time.Duration
-	RegInterval      time.Duration
-	MaxStreams       int
-	KeepAlivePeriod  time.Duration
-	IdleTimeout      time.Duration
-	HandshakeTimeout time.Duration
+	PunchTimeout      time.Duration
+	ExchangeDeadline  time.Duration
+	Spake2Resend      time.Duration
+	ConfirmResend     time.Duration
+	ReadDeadline      time.Duration
+	RegInterval       time.Duration
+	MaxStreams        int
+	ForwardMaxStreams int // 0 means use env/default
+	KeepAlivePeriod   time.Duration
+	IdleTimeout       time.Duration
+	HandshakeTimeout  time.Duration
 }
 
 func (c PeerConfig) punchTimeout() time.Duration {
@@ -105,7 +106,7 @@ func ConnectPeerWithConfig(ctx context.Context, relayAddr string, code string, c
 		return nil, false, fmt.Errorf("exchange: %w", err)
 	}
 
-	// Re-bind a wildcard socket on the same local port for hole punching
+	// Re-bind on the same concrete local address for hole punching
 	// and QUIC. SO_REUSEADDR avoids EADDRINUSE from the just-closed socket.
 	lc := &net.ListenConfig{
 		Control: rebindControl,
@@ -127,7 +128,7 @@ func ConnectPeerWithConfig(ctx context.Context, relayAddr string, code string, c
 	}
 	if peerUDPAddr.IP == nil || peerUDPAddr.Port == 0 {
 		udpConn.Close()
-		return nil, false, fmt.Errorf("invalid peer address: %s", peerAddrStr)
+		return nil, false, fmt.Errorf("invalid peer address: %q", peerAddrStr)
 	}
 
 	role := util.RoleString(isServer)
@@ -138,10 +139,14 @@ func ConnectPeerWithConfig(ctx context.Context, relayAddr string, code string, c
 	successCh := startHolePunching(punchCtx, udpConn, peerUDPAddr)
 	select {
 	case observedAddr := <-successCh:
-		util.LogHole.PrintfSuccess("Hole punch succeeded")
-		if observedAddr.IP.Equal(peerUDPAddr.IP) && observedAddr.Port != peerUDPAddr.Port {
-			util.LogHole.PrintfInfo("Peer port corrected: %d -> %d", peerUDPAddr.Port, observedAddr.Port)
-			peerUDPAddr = observedAddr
+		if observedAddr == nil {
+			util.LogHole.PrintfWarn("Hole punch aborted, falling back to QUIC")
+		} else {
+			util.LogHole.PrintfSuccess("Hole punch succeeded")
+			if observedAddr.IP.Equal(peerUDPAddr.IP) && observedAddr.Port != peerUDPAddr.Port {
+				util.LogHole.PrintfInfo("Peer port corrected: %d -> %d", peerUDPAddr.Port, observedAddr.Port)
+				peerUDPAddr = observedAddr
+			}
 		}
 	case <-punchCtx.Done():
 		util.LogHole.PrintfWarn("Hole punch timed out, falling back to QUIC")

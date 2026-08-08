@@ -145,12 +145,12 @@ conn, err := qvole.Dial(ctx,
 | Option | Default | Description |
 |---|---|---|
 | `WithPunchTimeout(d Duration)` | 10s | Max time for UDP hole punching |
-| `WithExchangeDeadline(d Duration)` | 90s | Max time for SPAKE2 exchange |
+| `WithExchangeDeadline(d Duration)` | 5m | Max time for SPAKE2 exchange |
 | `WithKeepAlive(d Duration)` | 2s | QUIC keepalive interval |
 | `WithIdleTimeout(d Duration)` | 2min | QUIC idle timeout |
 | `WithHandshakeTimeout(d Duration)` | 30s | QUIC handshake timeout |
 | `WithMaxStreams(n int)` | 100 | Max incoming bidirectional streams |
-| `WithForwardMaxStreams(n int)` | 200 | Max incoming streams for tunnel forwarding |
+| `WithForwardMaxStreams(n int)` | 200 | Max concurrent tunnel streams (overrides `QVOLE_FORWARD_MAX_STREAMS` env var) |
 
 ### Exec
 
@@ -180,7 +180,7 @@ Generates a human-readable code like `"0000-word-word-word"`.
 ```go
 func Nameplate(code string) string
 ```
-Derives a 4-character room identifier from a code.
+Derives a room identifier from a code (4-digit prefix for generated codes, 8 hex chars for user codes).
 
 ```go
 func ParseTunnelRequest(spec, typ string) (*TunnelRequest, error)
@@ -202,19 +202,12 @@ func PutBuffer(buf []byte)
 
 ## Stats
 
-`StatsTracker` provides throughput tracking:
+Throughput statistics are tracked internally. Enable periodic logging by setting the
+`QVOLE_STATS_MS` environment variable to the reporting interval in milliseconds.
 
 ```go
-import "github.com/fernjager/qvole/internal/engine"
-
-st := engine.NewStatsTracker()
-// Wrap writers to count bytes:
-txW := st.TXWriter(conn)  // counts transmitted bytes
-rxW := st.RXWriter(conn)  // counts received bytes
-// Periodic logging:
-st.Start(2 * time.Second)
-// Final totals:
-st.StopAndLog()
+// Stats are logged automatically when QVOLE_STATS_MS is set.
+// The StatsTracker type is internal and not part of the public API.
 ```
 
 ## Running your own relay

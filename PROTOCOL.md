@@ -58,7 +58,7 @@ NNNN-word-word-word
 ```
 
 Where `NNNN` is a 4-digit number (0000-9999) and each word is drawn from a
-dictionary of 7766 words. Generated codes have ~52 bits of entropy.
+dictionary of 7762 words. Generated codes have ~52 bits of entropy.
 
 **User-provided codes** are any string 8-256 characters in length.
 

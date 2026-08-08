@@ -44,7 +44,11 @@ func processSpakeMsg(body string, state *spake2.State, myPointM, myPointN []byte
 	peerPointN := peerPayload[pointLen : pointLen*2]
 	peerFingerprint = peerPayload[pointLen*2 : spake2PayloadLen]
 
-	isServer = bytes.Compare(myPointM, peerPointM) > 0
+	if cmp := bytes.Compare(myPointM, peerPointM); cmp == 0 {
+		return nil, nil, nil, false, nil, nil, fmt.Errorf("spake2: peer sent reflected point")
+	} else {
+		isServer = cmp > 0
+	}
 
 	if isServer {
 		effectiveMyPoint = myPointN
@@ -237,7 +241,7 @@ func registerAndExchange(ctx context.Context, udpConn *net.UDPConn, room, code s
 				continue
 			}
 			payload := string(bytes.TrimSpace(relayPayload))
-			// "REGD <room> OK <addr>" — confirmed registration.
+			// "REGD <room> OK <addr>"; confirmed registration.
 			if strings.HasPrefix(payload, "OK ") {
 				receivedREGD = true
 				extAddr := strings.TrimSpace(payload[3:])
@@ -247,7 +251,7 @@ func registerAndExchange(ctx context.Context, udpConn *net.UDPConn, room, code s
 				}
 				continue
 			}
-			// "REGD <room> <cookie>" — cookie challenge (32 hex chars).
+			// "REGD <room> <cookie>"; cookie challenge (32 hex chars).
 			if len(payload) == 32 {
 				_, hexErr := hex.DecodeString(payload)
 				if hexErr == nil {

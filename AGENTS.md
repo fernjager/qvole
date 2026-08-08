@@ -28,7 +28,7 @@ tests/                               # integration tests (compile + run binary)
 ```
 
 - **Root package** = public Go library. `internal/` packages are not importable externally.
-- `relay/` and `spake2/` are **not under `internal/`** — they are part of the public API.
+- `relay/` and `spake2/` are **not under `internal/`**; they are part of the public API.
 - The single binary is at `cmd/qvole/`. Subcommands are dispatched in `main.go`.
 - Platform-specific files use `_unix.go` / `_windows.go` suffixes: `signal_*.go`, `conn_rebind_*.go`.
 
@@ -37,7 +37,7 @@ tests/                               # integration tests (compile + run binary)
 All tunables use a three-tier fallback: **option value → env var → default**. Zero values mean "use default".
 
 ```go
-// engine/connect.go — PeerConfig methods delegate to resolveDur/resolveInt
+// engine/connect.go: PeerConfig methods delegate to resolveDur/resolveInt
 func (c PeerConfig) punchTimeout() time.Duration {
     return resolveDur(c.PunchTimeout, "QVOLE_PUNCH_TIMEOUT_MS", defaultPunchTimeout)
 }
@@ -47,7 +47,7 @@ When adding a zero-means-default field, remember that `time.Duration(0)` is trea
 
 ## Fuzz Tests
 
-Fuzz tests are in `cmd/qvole/fuzz_test.go` (package `main`), **not** in the packages they exercise. CI runs each fuzz target for 30s with custom error handling:
+Fuzz tests are in `cmd/qvole/fuzz_test.go` (package `main`), **not** in the packages they exercise. CI runs each fuzz target for 30s and fails on any non-zero exit (including crashers).
 
 ```bash
 go test -fuzz=FuzzNameplate -fuzztime=30s -run='^$' ./cmd/qvole/
@@ -56,9 +56,9 @@ go test -fuzz=FuzzNameplate -fuzztime=30s -run='^$' ./cmd/qvole/
 ## Key Environment Variables
 
 All `QVOLE_*` env vars are read at runtime (not just via CLI flags). See README for full list. Notable ones:
-- `QVOLE_CODE` — connection code (alternative to `--code`)
-- `QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING` — set to `1` in `main.go` to suppress quic-go warnings
-- `NO_COLOR` — disables ANSI color in log output
+- `QVOLE_CODE`: connection code (alternative to `--code`)
+- `QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING`: set to `1` in `main.go` to suppress quic-go warnings
+- `NO_COLOR`: disables ANSI color in log output
 
 ## Docker
 
