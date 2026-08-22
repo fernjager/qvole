@@ -10,8 +10,8 @@ make test-integration   # ./tests/ only
 make lint           # golangci-lint (CI uses latest v2)
 ```
 
-- Go 1.26+ (see `go.mod`).
-- Lint config is `version: "2"` format. CI uses `golangci-lint v2.12.2` via `golangci-lint-action@v9`.
+- Go 1.27+ (see `go.mod`).
+- Lint config is `version: "2"` format. CI uses `golangci-lint v2.13.1` via `golangci-lint-action@v9`.
 - Integration tests (`tests/`) compile the binary via `TestMain` into a temp dir, then run it against a temp relay on random ports starting at 19000.
 
 ## Architecture

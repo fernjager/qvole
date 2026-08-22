@@ -2,7 +2,7 @@
 
 <h1 align="center">qvole</h1>
 <p align="center">
-  <a href="https://go.dev"><img src="https://img.shields.io/badge/go-1.26-blue" alt="Go Version"></a>
+  <a href="https://go.dev"><img src="https://img.shields.io/badge/go-1.27-blue" alt="Go Version"></a>
   <a href="https://github.com/fernjager/qvole/actions/workflows/ci.yml"><img src="https://github.com/fernjager/qvole/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
 </p>
@@ -60,7 +60,7 @@ curl -fsSL https://get.qvole.dev | sh
 git clone https://github.com/fernjager/qvole && cd qvole && make && sudo make install
 ```
 
-(Requires Go 1.26+)
+(Requires Go 1.27+)
 
 ---
 

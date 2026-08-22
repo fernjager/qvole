@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-08-22
+
+### Changed
+- Bump Go toolchain to 1.27.0.
+- Update `golang.org/x/crypto` to v0.55.0.
+- Update `golang.org/x/net` to v0.58.0.
+- Bump `golangci-lint` to v2.13.1 (CI).
+
 ## [0.1.3] - 2026-08-08
 ### Security
 - Zeroize intermediate scalar byte buffers after use in `PasswordToScalar`, `generatorScalar`, and `ComputeShared` to close zeroization gaps.
