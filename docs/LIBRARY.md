@@ -237,4 +237,4 @@ conn, err := qvole.Dial(ctx,
 - All traffic encrypted via SPAKE2 PAKE + TLS 1.3 with certificate pinning.
 - Relay is untrusted: sees only opaque hex blobs, cannot derive session keys.
 - Forward secrecy for peer metadata (addresses, certificate fingerprints).
-- See [PROTOCOL.md](./PROTOCOL.md) for the full wire protocol.
+- See [PROTOCOL.md](./docs/PROTOCOL.md) for the full wire protocol.

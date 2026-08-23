@@ -8,6 +8,14 @@
 </p>
 <p align="center"><em>Fast tunnels over QUIC, burrowed through NATs.</em></p>
 
+<p align="center">
+  <a href="./README.md">English</a> &nbsp;|&nbsp;
+  <a href="./docs/translations/README.zh-CN.md">简体中文</a> &nbsp;|&nbsp;
+  <a href="./docs/translations/README.zh-TW.md">繁體中文</a> &nbsp;|&nbsp;
+  <a href="./docs/translations/README.es.md">Español</a> &nbsp;|&nbsp;
+  <a href="./docs/translations/README.ru.md">Русский</a>
+</p>
+
 Two machines, both behind NAT. Share a short code with your peer and you have an encrypted pipe between you.
 
 Forward ports, transfer files, run remote commands and pipes. A single binary, no config files, no setup.
@@ -22,22 +30,27 @@ See [examples](#pipe) further below for more inspiration!
 
 ```bash
 # Send a file
-alice$ qvole pipe < in                                           # prints connection code, waits for bob
-bob$   QVOLE_CODE=CODE qvole pipe > out                          # bob connects, receiving file from alice
+alice$ qvole pipe < in                         # prints connection code, waits for bob
+bob$   QVOLE_CODE=CODE qvole pipe > out        # bob connects, receiving file from alice
 
 # Send a directory
-alice$ tar czf - dir/ | qvole pipe                              # alice streams tar of dir/ to bob
-bob$   QVOLE_CODE=CODE qvole pipe | tar xzf -                   # bob receives and extracts dir/
+alice$ tar czf - dir/ | qvole pipe             # alice streams tar of dir/ to bob
+bob$   QVOLE_CODE=CODE qvole pipe | tar xzf -  # bob receives and extracts dir/
 
 # Port Forwarding
-alice$ qvole tunnel -L 8080:localhost:80 -R 2222:localhost:22   # alice sets up config, bob allowlists
-bob$   QVOLE_CODE=CODE qvole tunnel -aL 127.0.0.1:2222 -aF localhost:80
-alice$ curl localhost:8080                                      # reaches bob's :80
-bob$   ssh -p 2222 localhost                                    # reaches alice's sshd
+alice$ qvole tunnel \
+    -L 8080:localhost:80 \
+    -R 2222:localhost:22
+# bob allows the tunnel requests
+bob$   QVOLE_CODE=CODE qvole tunnel \
+    -aF localhost:80 \
+    -aL 127.0.0.1:2222
+alice$ curl localhost:8080    # reaches bob's :80
+bob$   ssh -p 2222 localhost  # reaches alice's sshd
 
 # Remote command (alice hosts the command, bob connects)
-alice$ qvole exec --cmd "uptime"                                # runs on alice, bob sees output
-alice$ qvole exec --cmd "script -q bash /dev/null"              # alice gives bob remote shell
+alice$ qvole exec --cmd "uptime"                    # runs on alice, bob sees output
+alice$ qvole exec --cmd "script -q bash /dev/null"  # alice gives bob remote shell
 bob$   QVOLE_CODE=CODE qvole exec
 
 # Run a private relay server (UDP)
@@ -155,7 +168,7 @@ without exposing them. If this tool happens to be useful to anyone else, that wo
 
 ### Protocol
 
-**[Full protocol specification → PROTOCOL.md](./PROTOCOL.md)**
+**[Full protocol specification → PROTOCOL.md](./docs/PROTOCOL.md)**
 
 The handshake completes in seconds: SPAKE2 PAKE over a UDP relay for peer discovery
 and authentication, then UDP hole punching for direct NAT traversal, then a QUIC
@@ -238,7 +251,7 @@ conn, _ = qvole.Dial(ctx,
 )
 ```
 
-See **[LIBRARY.md](./LIBRARY.md)** for the full API reference, option reference, stats tracking, and more examples.
+See **[LIBRARY.md](./docs/LIBRARY.md)** for the full API reference, option reference, stats tracking, and more examples.
 
 ## Subcommands
 
@@ -325,14 +338,14 @@ $ echo "qsend() { tar czf - \"\$@\" | qvole pipe --stats; }" >> ~/.bashrc
 $ echo "qrecv() { qvole pipe --stats | tar xzf -; }" >> ~/.bashrc
 $ echo "alias qp='qvole pipe --stats'" >> ~/.bashrc
 
-alice$ qsend file.dat                              # send a file (gzipped)
-alice$ qsend dir/                                  # send a directory (gzipped)
-bob$   qrecv                                       # receive and extract
-alice$ qsend file1.dat dir/                        # send multiple
-bob$   qrecv                                       # receive all
+alice$ qsend file.dat        # send a file (gzipped)
+alice$ qsend dir/            # send a directory (gzipped)
+bob$   qrecv                 # receive and extract
+alice$ qsend file1.dat dir/  # send multiple
+bob$   qrecv                 # receive all
 
-alice$ arecord -f cd | qp                          # stream mic over P2P (macOS: ffmpeg -f avfoundation -i ":0" -f mp3 - | qp)
-bob$   qp | aplay -f cd                            # hear alice's mic (or: qp | ffplay -i pipe:0 -nodisp)
+alice$ arecord -f cd | qp    # stream mic over P2P (macOS: ffmpeg -f avfoundation -i ":0" -f mp3 - | qp)
+bob$   qp | aplay -f cd      # hear alice's mic (or: qp | ffplay -i pipe:0 -nodisp)
 ```
 
 ### Exec
@@ -460,8 +473,8 @@ alice$ qvole tunnel -L 2375:localhost:2375
 bob$   QVOLE_CODE=CODE qvole tunnel -aF localhost:2375
 
 # SOCKS proxy: route traffic through the peer's network
-alice$ ssh -D 1080 localhost -N                      # start local SOCKS proxy
-alice$ qvole tunnel -R 1080:localhost:1080           # expose it to Bob
+alice$ ssh -D 1080 localhost -N                          # start local SOCKS proxy
+alice$ qvole tunnel -R 1080:localhost:1080               # expose it to Bob
 bob$   QVOLE_CODE=CODE qvole tunnel -aL 127.0.0.1:1080   # Bob now has SOCKS on :1080
 
 # Monitoring stack: reach Prometheus/Grafana behind NAT
@@ -475,7 +488,7 @@ bob$   QVOLE_CODE=CODE qvole tunnel -aF localhost:32400
 # SSH escape hatch: expose sshd on a locked-down machine
 alice$ qvole tunnel -R 2222:localhost:22
 bob$   QVOLE_CODE=CODE qvole tunnel -aL 127.0.0.1:2222
-bob$   ssh -p 2222 localhost                         # Bob reaches Alice's sshd
+bob$   ssh -p 2222 localhost                              # Bob reaches Alice's sshd
 
 # Game servers: host a Minecraft server behind NAT
 alice$ qvole tunnel -L 25565:localhost:25565
@@ -486,8 +499,8 @@ alice$ qvole tunnel -L 6379:localhost:6379
 bob$   QVOLE_CODE=CODE qvole tunnel -aF localhost:6379
 
 # Web dev preview: expose a local dev server to a peer
-alice$ npm run dev                                   # running on :3000
-alice$ qvole tunnel -R 3000:localhost:3000           # Alice exposes her :3000 to Bob
+alice$ npm run dev                                       # running on :3000
+alice$ qvole tunnel -R 3000:localhost:3000               # Alice exposes her :3000 to Bob
 bob$   QVOLE_CODE=CODE qvole tunnel -aL 127.0.0.1:3000   # Bob can now visit localhost:3000
 ```
 
@@ -561,7 +574,7 @@ WantedBy=multi-user.target
 
 ### Privacy & Terms
 
-[Privacy policy and terms of service for the public relay &rarr; PRIVACY.md](./PRIVACY.md)
+[Privacy policy and terms of service for the public relay &rarr; PRIVACY.md](./docs/PRIVACY.md)
 
 ---
 

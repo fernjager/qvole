@@ -3,7 +3,7 @@ set -eu
 
 echo "This installs qvole from https://github.com/fernjager/qvole."
 echo "By proceeding you agree to the privacy policy and terms of service:"
-echo "  https://raw.githubusercontent.com/fernjager/qvole/main/PRIVACY.md"
+echo "  https://raw.githubusercontent.com/fernjager/qvole/main/docs/PRIVACY.md"
 echo
 
 REPO="fernjager/qvole"

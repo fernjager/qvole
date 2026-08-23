@@ -1,10 +1,10 @@
 # Security
 
 For the wire-level protocol description, payload layouts, and relay message
-formats, see [PROTOCOL.md](./PROTOCOL.md).
+formats, see [PROTOCOL.md](./docs/PROTOCOL.md).
 
 For privacy policy and terms of service covering the public relay, see
-[PRIVACY.md](./PRIVACY.md).
+[PRIVACY.md](./docs/PRIVACY.md).
 
 ## Security Model
 
@@ -388,7 +388,7 @@ details and rationale.
 
 ### 5. Hole Punching Attacks
 
-The hole punching mechanism is described in [PROTOCOL.md](./PROTOCOL.md) §2 Phase 3.
+The hole punching mechanism is described in [PROTOCOL.md](./docs/PROTOCOL.md) §2 Phase 3.
 This section analyses the security properties.
 
 #### Third-Party Denial of Service
@@ -457,7 +457,7 @@ relay traffic.
 ### 6. QUIC / TLS Attacks
 
 The QUIC connection setup and TLS configuration is described in
-[PROTOCOL.md](./PROTOCOL.md) §2 Phase 4. This section analyses the security properties.
+[PROTOCOL.md](./docs/PROTOCOL.md) §2 Phase 4. This section analyses the security properties.
 
 #### MITM on Direct Path
 
@@ -531,7 +531,7 @@ fingerprint comparison. Adding a SAN would have no security benefit.
 
 ### 7. Tunnel Subcommand Attacks
 
-The tunnel protocol is described in [PROTOCOL.md](./PROTOCOL.md) §2 Phase 5 (Tunnel
+The tunnel protocol is described in [PROTOCOL.md](./docs/PROTOCOL.md) §2 Phase 5 (Tunnel
 Mode) and §3.4-3.5. This section analyses the security properties.
 
 #### TCP Connection Hijack via Spec-Index Spoofing
