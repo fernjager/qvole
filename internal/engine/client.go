@@ -86,6 +86,16 @@ func RunPipe(ctx context.Context, relayAddr string, code string, stats bool) err
 			time.Sleep(pipeFinishDelay)
 			return nil
 		}
+		if LogDisconnect(util.LogPipe, acceptErr) {
+			tracker.StopAndLog()
+			time.Sleep(pipeFinishDelay)
+			return nil
+		}
+		if errors.Is(acceptErr, context.Canceled) {
+			// Local cancellation (e.g. SIGINT): normal shutdown, exit quietly.
+			util.LogPipe.Printf("Accept inbound stream canceled")
+			return nil
+		}
 		util.LogPipe.PrintfError("Accept inbound stream failed: %v", acceptErr)
 		return acceptErr
 	}

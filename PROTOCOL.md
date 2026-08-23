@@ -411,12 +411,17 @@ before the stream closes.
 │  My -R / peer's -L → I accept QUIC streams, I dial TCP.         │
 ```
 
-The control stream is opened immediately after QUIC connects. The peer with
-tunnel requests opens the stream, writes its accept status and requests + `END`,
-then reads the peer's accept status and requests from the same stream. The peer
-without requests accepts, reads first, then writes its own accept status and
-requests back. The accepting side sets a 30 s read deadline to prevent a stalled
-peer from holding the stream open indefinitely.
+The control stream is opened immediately after QUIC connects. The client side
+opens the stream and the server side accepts it. Each side writes its accept
+status and requests + `END` on the stream, then reads the peer's from the same
+stream. Reads and writes are bounded by a 30 s deadline so a stalled peer
+cannot hold the exchange open indefinitely.
+
+Both sides order the combined request list identically: the client's requests
+come first, then the server's. Each side tracks the index range of its own
+requests within that canonical ordering (the client's start at 0, the server's
+after the client's requests), so the 2-byte spec index on data streams maps to
+the same request on both peers.
 
 **Control stream format:**
 ```
@@ -426,10 +431,31 @@ R <listenAddr> <targetAddr>
 END
 ```
 
-Each peer declares whether it accepts incoming tunnel connections
-(`ACCEPT true` or `ACCEPT false`) before listing its requests. If a peer
-declares `ACCEPT false`, the other peer skips binding for that peer's `-R`
-requests and logs a warning.
+Each peer declares whether it is willing to accept incoming tunnel connections
+(`ACCEPT true` or `ACCEPT false`) before listing its requests. `ACCEPT true`
+means the peer has a tunnel allowlist configured (`-aL`/`-aF`, or the `-a`
+allow-all, which is not safe); individual requests are still filtered against
+that allowlist
+on the receiving side.
+
+`ACCEPT` is a coarse, boolean signal: it says "I will honor *some* peer
+requests", not which ones. Its exact effects:
+
+- A peer that declares `ACCEPT false` will not dial any peer-initiated streams,
+  so the other side skips binding **its own `-L` listeners** (and logs a warning
+  telling its operator which `-aL`/`-aF` flag the peer must run).
+- Peer `-R` requests are gated by the *receiving* side's own `-aL` allowlist
+  entries, not by the peer's `ACCEPT`: a request whose `<listenAddr>` matches no
+  `-aL` entry is ignored with a warning, even when the peer declared
+  `ACCEPT true`.
+- Peer `-L` requests are gated by the receiving side's own `-aF` allowlist
+  entries: a stream whose `<targetAddr>` matches no `-aF` entry is rejected with
+  a warning, even when the peer declared `ACCEPT true`.
+
+Because `ACCEPT` is per-side rather than per-request, a peer with a allowlist
+that does not cover a particular request may still cause the requesting side to
+bind a listener that will reject every connection (with the rejection visible
+only in the allowlisting side's logs).
 
 - `L`: local forward, listen on `<listenAddr>`, forward to `<targetAddr>`.
 - `R`: remote forward, peer listens on `<listenAddr>`, forwards to `<targetAddr>`.
@@ -527,8 +553,13 @@ ACCEPT true\n
 END\n
 ```
 
-- `ACCEPT true` or `ACCEPT false`: whether the peer accepts incoming tunnel connections.
-  If `false`, the other side skips binding listeners for any tunnel requests from this peer.
+- `ACCEPT true` or `ACCEPT false`: whether the peer is willing to accept tunnel
+  requests (has an `-aL`/`-aF` allowlist or the `-a` allow-all flag). If `false`,
+  the other side skips binding its own `-L` listeners (the declaring peer will
+  not honor them) and logs a warning. If `true`, the receiving side still
+  filters each request against its own allowlist: peer `-R` requests need a
+  matching `-aL` listen entry, peer `-L` requests a matching `-aF` forward entry
+  (see the control stream description above).
 - `<type>`: `L` (local forward) or `R` (remote forward).
 - `<listenAddr>`: address on which the listener binds.
 - `<targetAddr>`: address to dial for incoming connections.
@@ -596,23 +627,33 @@ to overcome packet loss (see §2).
 
 ## 6. Versioning
 
-The qvole wire protocol uses the **MAJOR.MINOR** portion of the software version
-to gate compatibility. Peers negotiate the protocol version via TLS ALPN; the relay
-is unaware of versioning.
+Wire compatibility is gated **only** by the ALPN string, which is derived from
+the protocol version, not the software version. Peers negotiate the protocol
+version via TLS ALPN; the relay is unaware of versioning.
 
 **ALPN string:** `"qvole-v<MAJOR>.<MINOR>"` (e.g. `"qvole-v0.1"`).
 
-| Bump | Example | Meaning |
-|------|---------|---------|
-| Patch (`0.1.X`) | `0.1.3 → 0.1.4` | Wire-compatible: new subcommands, bugfixes, internal refactors, default tuning |
-| Minor (`0.X.0`) | `0.1.0 → 0.2.0` | Wire-breaking: SPAKE2 layout change, relay message format, certificate algorithm, domain separation strings, or ALPN change |
-| Major (`X.0.0`) | `0.1.0 → 1.0.0` | Protocol redesign that breaks ALPN compatibility with all prior versions
+The `ProtocolVersion` constant (`internal/engine/transport.go`) is
+hand-maintained and bumped **only** when the wire format changes: SPAKE2 layout,
+relay message format, certificate algorithm, domain separation strings, or the
+ALPN string itself. Peers that don't agree on `MAJOR.MINOR` fail during the TLS
+handshake with an ALPN mismatch before any application data flows.
 
-Peers that don't agree on `MAJOR.MINOR` fail during the TLS handshake with an ALPN
-mismatch before any application data flows. Patch-level differences (`0.1.3` vs
-`0.1.7`) produce the same ALPN string and interoperate.
+| Protocol bump | Example | Meaning |
+|---------------|---------|----------|
+| Patch | `0.1 → 0.1.1` | Wire-compatible: new subcommands, bugfixes, internal refactors, default tuning, reinterpreted option semantics |
+| Minor | `0.1 → 0.2` | Wire-breaking: SPAKE2 layout change, relay message format, certificate algorithm, domain separation strings, or ALPN change |
+| Major | `0.1 → 1.0` | Protocol redesign that breaks ALPN compatibility with all prior versions |
 
-The `ProtocolVersion` constant is hand-maintained in `internal/engine/transport.go`
-and bumped intentionally alongside the corresponding wire-format changes.
-The software version displayed by `qvole --version` is set independently via
-build-time ldflags (git tags).
+Software versioning is independent of wire compatibility: any software release
+that leaves `ProtocolVersion` (and therefore the ALPN string) unchanged remains
+wire-compatible with all prior software releases using the same protocol
+version. For example, software `0.1.4 → 0.2.0` kept the wire protocol at `0.1`
+(ALPN `"qvole-v0.1"`) while reinterpreting the tunnel-config `ACCEPT` semantics
+and changing who opens the control stream (the client, regardless of request
+count). Connections therefore still establish between `0.2.0` and `0.1.x`
+peers, but tunnel sessions assume both sides understand the `0.2.0` exchange
+model; pipe and exec modes remain interoperable with `0.1.x`.
+
+The software version displayed by `qvole --version` is the `version` variable in
+`cmd/qvole/main.go` and is set independently of `ProtocolVersion`.

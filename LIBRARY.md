@@ -63,11 +63,11 @@ err := qvole.Tunnel(ctx,
     qvole.WithRemoteTunnel("8080:localhost:80"),
 )
 
-// Peer consuming the service: connect with --allow-tunnel
+// Peer consuming the service: allowlist the listen address the peer's -R opens
 err := qvole.Tunnel(ctx,
     qvole.WithCode("my-secret"),
     qvole.WithRelay("relay.qvole.dev:9009"),
-    qvole.WithAllowTunnel(true),
+    qvole.WithAllowListen("127.0.0.1:8080"),
 )
 // Now localhost:8080 reaches the peer's port 80
 ```
@@ -165,10 +165,17 @@ conn, err := qvole.Dial(ctx,
 |---|---|
 | `WithLocalTunnel(spec string)` | Local port forward, e.g. `"8080:localhost:80"` |
 | `WithRemoteTunnel(spec string)` | Remote port forward, same format |
-| `WithAllowTunnel(b bool)` | Accept tunnel requests from the peer |
+| `WithAllowListen(addrPort string)` | Allowlist an addr:port the peer may ask this side to listen on (peer's `-R`). Repeatable |
+| `WithAllowForward(addrPort string)` | Allowlist an addr:port the peer may reach through this side (peer's `-L`). Repeatable |
+| `WithAllowAll(b bool)` | Accept every peer request without matching (not safe) |
 
-Tunnel specs use the format `[addr:]port:host:port`. If the listen address is
-omitted, it defaults to `127.0.0.1`. IPv6 addresses must be bracketed.
+Tunnel specs use the format `[laddr:]lport:raddr:rport` for `-L` and
+`[raddr:]rport:laddr:lport` for `-R`. If the listen address is omitted, it
+defaults to `127.0.0.1`. IPv6 addresses must be bracketed.
+
+Without any `WithAllow*` option, no peer tunnel requests are accepted: your
+`-L` requests need the peer's `WithAllowForward`, and your `-R` requests need
+the peer's `WithAllowListen`.
 
 ## Utilities
 

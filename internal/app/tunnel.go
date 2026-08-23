@@ -19,8 +19,16 @@ import (
 
 // RunTunnel establishes a peer-to-peer tunnel, exchanging port-forwarding configurations
 // and starting TCP listeners for local tunnels and stream acceptors for remote tunnels.
+// allowAll (-a) accepts every peer request; otherwise allowListen (-aL) and
+// allowForward (-aF) allowlist which peer tunnel requests are honored
+// (see TunnelAllow). An empty allowlist accepts nothing.
 // forwardMaxStreams overrides QVOLE_FORWARD_MAX_STREAMS; 0 means use env/default.
-func RunTunnel(ctx context.Context, relayAddr, code string, localTunnels, remoteTunnels []string, allowTunnel bool, forwardMaxStreams int) error {
+func RunTunnel(ctx context.Context, relayAddr, code string, localTunnels, remoteTunnels []string, allowAll bool, allowListen, allowForward []string, forwardMaxStreams int) error {
+	allow := TunnelAllow{All: allowAll, Listen: allowListen, Forward: allowForward}
+	if err := allow.Validate(); err != nil {
+		return err
+	}
+
 	conn, isServer, err := engine.ConnectPeer(ctx, relayAddr, code)
 	if err != nil {
 		return err
@@ -47,22 +55,39 @@ func RunTunnel(ctx context.Context, relayAddr, code string, localTunnels, remote
 		myReqs = append(myReqs, *s)
 	}
 
-	peerAccept, reqs, err := ExchangeTunnelConfig(ctx, conn, myReqs, allowTunnel)
+	peerAccept, reqs, myReqStart, err := ExchangeTunnelConfig(ctx, conn, myReqs, allow, isServer)
 	if err != nil {
 		return fmt.Errorf("config exchange: %w", err)
 	}
 	myReqCount := len(myReqs)
+	mine := func(i int) bool { return i >= myReqStart && i < myReqStart+myReqCount }
 
 	if len(reqs) == 0 {
 		return fmt.Errorf("no tunnel requests exchanged")
 	}
 
 	for i, req := range reqs {
+		my := mine(i)
 		switch {
-		case i < myReqCount && !peerAccept:
-			util.LogTunnel.PrintfWarn("Peer does not accept tunnels, skipping -%s %s -> %s", req.Type, req.ListenAddr, req.TargetAddr)
-		case i >= myReqCount && !allowTunnel:
-			util.LogTunnel.PrintfWarn("Use --allow-tunnel to accept peer request -%s %s -> %s", req.Type, req.ListenAddr, req.TargetAddr)
+		case my && !peerAccept:
+			// Peer has no allowlist (-a/-aL/-aF); tell the operator what the
+			// peer needs to run to accept each of our requests.
+			switch req.Type {
+			case "L":
+				util.LogTunnel.PrintfWarn("Peer rejected -L %s -> %s (peer must run with -aF %s to allow)", req.ListenAddr, req.TargetAddr, req.TargetAddr)
+			case "R":
+				util.LogTunnel.PrintfWarn("Peer rejected -R %s -> %s (peer must run with -aL %s to allow)", req.ListenAddr, req.TargetAddr, req.ListenAddr)
+			}
+		case !my && !allow.Accepts():
+			util.LogTunnel.PrintfWarn("Ignoring peer request -%s %s -> %s (run with -aL/-aF to accept, or -a to allow all)", req.Type, req.ListenAddr, req.TargetAddr)
+		case my && req.Type == "R" && peerAccept:
+			// The peer listens on our -R address; we dial the target for each
+			// inbound connection.
+			util.LogTunnel.PrintfSuccess("Tunnel forwarding to %s", util.Bold(req.TargetAddr))
+		case !my && req.Type == "L" && allow.AllowsForward(req.TargetAddr):
+			// The peer's -L: they listen; we dial their target for each
+			// inbound connection.
+			util.LogTunnel.PrintfSuccess("Tunnel forwarding to %s", util.Bold(req.TargetAddr))
 		}
 	}
 
@@ -76,6 +101,10 @@ func RunTunnel(ctx context.Context, relayAddr, code string, localTunnels, remote
 	}
 	initOutboundGuard(fms)
 
+	// Per-session announcement state: each RunTunnel announces "Tunnel N
+	// established" once per spec, independent of other sessions.
+	announced := &sync.Map{}
+
 	var wg sync.WaitGroup
 	var acceptorErr, listenerErr error
 
@@ -85,7 +114,7 @@ func RunTunnel(ctx context.Context, relayAddr, code string, localTunnels, remote
 			cancel()
 			wg.Done()
 		}()
-		acceptorErr = RunStreamAcceptor(ctx, conn, reqs, myReqCount, allowTunnel, fms)
+		acceptorErr = RunStreamAcceptor(ctx, conn, reqs, myReqStart, myReqCount, allow, fms, announced)
 	}()
 
 	wg.Add(1)
@@ -94,21 +123,56 @@ func RunTunnel(ctx context.Context, relayAddr, code string, localTunnels, remote
 			cancel()
 			wg.Done()
 		}()
-		listenerErr = RunTCPListeners(ctx, conn, reqs, myReqCount, peerAccept, allowTunnel)
+		listenerErr = RunTCPListeners(ctx, conn, reqs, myReqStart, myReqCount, peerAccept, allow)
 	}()
 
 	wg.Wait()
+	// A failure on one side cancels the context, which makes the other side
+	// report context.Canceled; prefer the real error so it is not shadowed
+	// and silently swallowed by the caller.
+	for _, err := range []error{acceptorErr, listenerErr} {
+		if err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+	}
 	if acceptorErr != nil {
 		return acceptorErr
 	}
 	return listenerErr
 }
 
+// logSentConfig logs what this side sent in the tunnel config exchange: the
+// number of requests, or that it is merely awaiting the peer's requests when
+// it configured none.
+func logSentConfig(myReqs []TunnelRequest) {
+	if len(myReqs) == 0 {
+		util.LogTunnel.PrintfInfo("Awaiting tunnel request(s) from peer")
+		return
+	}
+	util.LogTunnel.PrintfSuccess("Sent %d tunnel request(s)", len(myReqs))
+}
+
 // ExchangeTunnelConfig exchanges tunnel requests over a QUIC control stream.
-// Returns whether the peer accepts tunnels, the combined request list, and any error.
-func ExchangeTunnelConfig(ctx context.Context, conn *quic.Conn, myReqs []TunnelRequest, allowTunnel bool) (peerAccept bool, reqs []TunnelRequest, err error) {
+// Returns whether the peer accepts the request set, the combined request list,
+// the index of this side's first request within the combined list, and any
+// error. Each side declares ACCEPT true when it is willing to accept requests
+// (-a, or a non-empty -aL/-aF allowlist); individual requests are still
+// filtered against the allowlist locally.
+//
+// The client opens the control stream and the server accepts it, which is
+// deterministic on both sides. Both sides write their config on the stream
+// and read the peer's config from the same stream; reads and writes are
+// bounded by streamConfigTimeout so a stalled peer cannot hold the exchange
+// open indefinitely.
+//
+// Both sides order the combined request list identically: the client's
+// requests come first, then the server's. The returned myReqStart is the index
+// of this side's requests within that canonical ordering (0 for the client,
+// len(peerReqs) for the server), so stream-header indexes map to the same
+// request on both peers.
+func ExchangeTunnelConfig(ctx context.Context, conn *quic.Conn, myReqs []TunnelRequest, allow TunnelAllow, isServer bool) (peerAccept bool, reqs []TunnelRequest, myReqStart int, err error) {
 	if len(myReqs) > maxTunnelRequests {
-		return false, nil, fmt.Errorf("too many tunnel requests: %d (max %d)", len(myReqs), maxTunnelRequests)
+		return false, nil, 0, fmt.Errorf("too many tunnel requests: %d (max %d)", len(myReqs), maxTunnelRequests)
 	}
 
 	newScanner := func(r io.Reader) *bufio.Scanner {
@@ -117,65 +181,56 @@ func ExchangeTunnelConfig(ctx context.Context, conn *quic.Conn, myReqs []TunnelR
 		return s
 	}
 
-	if len(myReqs) > 0 {
-		stream, err := conn.OpenStreamSync(ctx)
+	var stream *quic.Stream
+	if !isServer {
+		// Client: open the control stream.
+		s, err := conn.OpenStreamSync(ctx)
 		if err != nil {
-			return false, nil, fmt.Errorf("open control stream: %w", err)
+			return false, nil, 0, fmt.Errorf("open control stream: %w", err)
 		}
-		defer stream.Close()
-
-		stream.SetWriteDeadline(time.Now().Add(streamConfigTimeout))
-		if err := writeTunnelConfig(stream, allowTunnel, myReqs); err != nil {
-			return false, nil, err
-		}
-		stream.SetWriteDeadline(time.Time{})
-
-		stream.SetReadDeadline(time.Now().Add(streamConfigTimeout))
-		scanner := newScanner(stream)
-		peerAccept, err = readAcceptLine(scanner)
+		stream = s
+	} else {
+		// Server: accept the client's stream, bounded so a peer that never
+		// opens one cannot stall the exchange.
+		acceptCtx, cancel := context.WithTimeout(ctx, streamConfigTimeout)
+		defer cancel()
+		s, err := conn.AcceptStream(acceptCtx)
 		if err != nil {
-			return false, nil, err
+			return false, nil, 0, fmt.Errorf("accept control stream: %w", err)
 		}
-		peerReqs, err := readRequestsFromStream(scanner)
-		if err != nil {
-			return false, nil, err
-		}
-		stream.SetReadDeadline(time.Time{})
-
-		reqs = append(myReqs, peerReqs...)
-		util.LogTunnel.Printf("Received %d tunnel request(s) from peer (accept=%v)", len(peerReqs), peerAccept)
-		return peerAccept, reqs, nil
-	}
-
-	stream, err := conn.AcceptStream(ctx)
-	if err != nil {
-		return false, nil, fmt.Errorf("accept control stream: %w", err)
+		stream = s
 	}
 	defer stream.Close()
 
-	stream.SetReadDeadline(time.Now().Add(streamConfigTimeout))
+	// Each side writes its config, then reads the peer's from the same stream.
+	stream.SetWriteDeadline(time.Now().Add(streamConfigTimeout))
+	if err := writeTunnelConfig(stream, allow.Accepts(), myReqs); err != nil {
+		return false, nil, 0, err
+	}
+	stream.SetWriteDeadline(time.Time{})
+	logSentConfig(myReqs)
 
+	stream.SetReadDeadline(time.Now().Add(streamConfigTimeout))
 	scanner := newScanner(stream)
 	peerAccept, err = readAcceptLine(scanner)
 	if err != nil {
-		return false, nil, err
+		return false, nil, 0, err
 	}
 	peerReqs, err := readRequestsFromStream(scanner)
 	if err != nil {
-		return false, nil, err
+		return false, nil, 0, err
 	}
-	reqs = peerReqs
-	util.LogTunnel.Printf("Received %d tunnel request(s) from peer", len(reqs))
+	stream.SetReadDeadline(time.Time{})
 
-	stream.SetWriteDeadline(time.Now().Add(streamConfigTimeout))
-	if err := writeTunnelConfig(stream, allowTunnel, myReqs); err != nil {
-		return false, nil, err
+	// Canonical ordering: the client's requests first, then the server's.
+	if isServer {
+		reqs = append(peerReqs, myReqs...)
+		myReqStart = len(peerReqs)
+	} else {
+		reqs = append(myReqs, peerReqs...)
 	}
-	stream.SetWriteDeadline(time.Time{})
-
-	reqs = append(reqs, myReqs...)
-	util.LogTunnel.PrintfSuccess("Sent %d tunnel request(s)", len(myReqs))
-	return peerAccept, reqs, nil
+	util.LogTunnel.PrintfInfo("Received %d tunnel request(s) from peer", len(peerReqs))
+	return peerAccept, reqs, myReqStart, nil
 }
 
 // readAcceptLine reads the ACCEPT line from a scanner and returns the boolean value.
@@ -213,14 +268,18 @@ func writeTunnelConfig(w io.Writer, allow bool, reqs []TunnelRequest) error {
 }
 
 // RunStreamAcceptor accepts inbound QUIC streams and dispatches them to HandleTunnelStream,
-// bounded by forwardMaxStreams.
-func RunStreamAcceptor(ctx context.Context, conn *quic.Conn, reqs []TunnelRequest, myReqCount int, allowTunnel bool, forwardMaxStreams int) error {
+// bounded by forwardMaxStreams. myReqStart/myReqCount describe the index range
+// of this side's requests within reqs (see ExchangeTunnelConfig); announced is
+// the per-session announcement map (see announceTunnelOnce).
+func RunStreamAcceptor(ctx context.Context, conn *quic.Conn, reqs []TunnelRequest, myReqStart, myReqCount int, allow TunnelAllow, forwardMaxStreams int, announced *sync.Map) error {
 	guard := make(chan struct{}, forwardMaxStreams)
 	for {
 		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
-			var appErr *quic.ApplicationError
-			if errors.As(err, &appErr) && appErr.ErrorCode == 0 {
+			// Any remote close (graceful, application error 0, or abrupt)
+			// ends the session: report it as a disconnect rather than failing
+			// silently or dumping a raw quic-go error.
+			if engine.LogDisconnect(util.LogTunnel, err) {
 				return nil
 			}
 			return err
@@ -228,21 +287,24 @@ func RunStreamAcceptor(ctx context.Context, conn *quic.Conn, reqs []TunnelReques
 		guard <- struct{}{}
 		go func(s *quic.Stream) {
 			defer func() { <-guard }()
-			HandleTunnelStream(ctx, s, reqs, myReqCount, allowTunnel)
+			HandleTunnelStream(ctx, s, reqs, myReqStart, myReqCount, allow, announced)
 		}(stream)
 	}
 }
 
 // RunTCPListeners starts TCP listeners for local (-L) tunnels I own and remote
 // (-R) tunnels the peer owns, forwarding accepted connections over QUIC streams.
-func RunTCPListeners(ctx context.Context, conn *quic.Conn, reqs []TunnelRequest, myReqCount int, peerAccept bool, allowTunnel bool) error {
+// Peer -R requests are honored only when their listen address matches an -aL
+// allowlist entry (or -a is set). myReqStart/myReqCount describe the index range
+// of this side's requests within reqs (see ExchangeTunnelConfig).
+func RunTCPListeners(ctx context.Context, conn *quic.Conn, reqs []TunnelRequest, myReqStart, myReqCount int, peerAccept bool, allow TunnelAllow) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	errs := make(chan error, len(reqs))
 
 	for i, req := range reqs {
-		myReq := i < myReqCount
+		myReq := i >= myReqStart && i < myReqStart+myReqCount
 		if myReq {
 			if req.Type == "R" {
 				continue // -R means peer should listen, not me
@@ -254,8 +316,9 @@ func RunTCPListeners(ctx context.Context, conn *quic.Conn, reqs []TunnelRequest,
 			if req.Type == "L" {
 				continue // -L means peer should listen, not me
 			}
-			if !allowTunnel {
-				continue // I must accept peer's tunnels
+			if !allow.AllowsListen(req.ListenAddr) {
+				util.LogTunnel.PrintfWarn("Ignoring peer request -R %s -> %s (add -aL %s to allow)", req.ListenAddr, req.TargetAddr, req.ListenAddr)
+				continue
 			}
 		}
 
@@ -318,6 +381,22 @@ func getOutboundGuard() chan struct{} {
 	return outboundGuard
 }
 
+// announceTunnelOnce logs a one-time success message the first time a connection
+// is established through tunnel spec idx within a tunnel session, so users get a
+// clear "tunnel works" confirmation without per-connection noise. The map is
+// per-RunTunnel (not global) so repeated or concurrent sessions announce
+// independently. It returns true for the call that performed the announcement.
+func announceTunnelOnce(announced *sync.Map, idx int, target string) bool {
+	onceIface, _ := announced.LoadOrStore(idx, &sync.Once{})
+	first := false
+	once := onceIface.(*sync.Once)
+	once.Do(func() {
+		first = true
+		util.LogTunnel.PrintfSuccess("Tunnel established: ↔ %s", util.Bold(target))
+	})
+	return first
+}
+
 // HandleTunnelTCP opens a QUIC stream for a local TCP connection, writing a 2-byte
 // header with the tunnel spec index before bridging data.
 func HandleTunnelTCP(ctx context.Context, conn *quic.Conn, tcpConn net.Conn, specIdx int) {
@@ -356,8 +435,11 @@ func HandleTunnelTCP(ctx context.Context, conn *quic.Conn, tcpConn net.Conn, spe
 }
 
 // HandleTunnelStream reads the stream header and dials the corresponding tunnel target,
-// bridging the TCP connection and QUIC stream bidirectionally.
-func HandleTunnelStream(ctx context.Context, stream *quic.Stream, reqs []TunnelRequest, myReqCount int, allowTunnel bool) {
+// bridging the TCP connection and QUIC stream bidirectionally. myReqStart/myReqCount
+// describe the index range of this side's requests within reqs (see
+// ExchangeTunnelConfig); announced is the per-session announcement map (see
+// announceTunnelOnce).
+func HandleTunnelStream(ctx context.Context, stream *quic.Stream, reqs []TunnelRequest, myReqStart, myReqCount int, allow TunnelAllow, announced *sync.Map) {
 	defer stream.Close()
 
 	stream.SetReadDeadline(time.Now().Add(streamHeaderTimeout))
@@ -375,7 +457,7 @@ func HandleTunnelStream(ctx context.Context, stream *quic.Stream, reqs []TunnelR
 	req := reqs[idx]
 
 	// Dial for peer's -L (they listened) or my -R (they listened on my behalf).
-	myReq := int(idx) < myReqCount
+	myReq := int(idx) >= myReqStart && int(idx) < myReqStart+myReqCount
 	if req.Type == "L" && myReq {
 		return // I listened for my -L; peer shouldn't open streams for it
 	}
@@ -383,9 +465,11 @@ func HandleTunnelStream(ctx context.Context, stream *quic.Stream, reqs []TunnelR
 		return // I listened for peer's -R; peer shouldn't open streams for it
 	}
 
-	// Only check allowTunnel for peer-initiated tunnels.
-	if !myReq && !allowTunnel {
-		util.LogTunnel.PrintfWarn("Tunnel rejected: %s -> %s (use --allow-tunnel)", req.ListenAddr, req.TargetAddr)
+	// Allowlist check: peer-initiated tunnels are honored only when the target
+	// matches an -aF entry (or -a is set). Peer -R requests returned earlier,
+	// so only peer -L requests reach this point.
+	if !myReq && !allow.AllowsForward(req.TargetAddr) {
+		util.LogTunnel.PrintfWarn("Tunnel rejected: %s -> %s (add -aF %s to allow)", req.ListenAddr, req.TargetAddr, req.TargetAddr)
 		return
 	}
 
@@ -398,7 +482,10 @@ func HandleTunnelStream(ctx context.Context, stream *quic.Stream, reqs []TunnelR
 	}
 	defer tcpConn.Close()
 
-	util.LogTunnel.PrintfSuccess("Tunnel %d active: ↔ %s", idx, util.Bold(req.TargetAddr))
+	// Announce the first successful connection through this tunnel spec once;
+	// later connections only log at debug level so busy tunnels don't spam.
+	announceTunnelOnce(announced, int(idx), req.TargetAddr)
+	util.LogTunnel.Printf("Tunnel %d connection: ↔ %s", idx, util.Bold(req.TargetAddr))
 
 	// Set an absolute 5-minute lifetime cap on the QUIC stream so a peer
 	// that goes silent cannot hold the connection open indefinitely.

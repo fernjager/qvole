@@ -3,11 +3,16 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"net"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/quic-go/quic-go"
 )
 
 func TestBidirectionalCopy_TransfersBothDirections(t *testing.T) {
@@ -155,6 +160,57 @@ func TestBidirectionalCopy_WriteError(t *testing.T) {
 	b := &errReadWriter{writeErr: io.ErrShortWrite}
 
 	bidirectionalCopy(a, b)
+}
+
+func TestIsTimeoutError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"deadline exceeded", os.ErrDeadlineExceeded, true},
+		{"op error wrapping deadline", &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}, true},
+		{"closed", net.ErrClosed, false},
+		{"unexpected eof", io.ErrUnexpectedEOF, false},
+		{"plain error", errors.New("boom"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isTimeoutError(tc.err); got != tc.want {
+				t.Errorf("isTimeoutError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCopyErrorKind(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"nil", nil, ""},
+		{"graceful remote close", &quic.ApplicationError{Remote: true, ErrorCode: 0}, ""},
+		{"wrapped graceful remote close", fmt.Errorf("read: %w", &quic.ApplicationError{Remote: true, ErrorCode: 0}), ""},
+		{"application error", &quic.ApplicationError{Remote: true, ErrorCode: 1}, "disconnect"},
+		{"idle timeout", &quic.IdleTimeoutError{}, "disconnect"},
+		{"stateless reset", &quic.StatelessResetError{}, "disconnect"},
+		{"transport error", &quic.TransportError{}, "disconnect"},
+		{"local closed", net.ErrClosed, ""},
+		{"closed pipe", io.ErrClosedPipe, ""},
+		{"deadline exceeded", os.ErrDeadlineExceeded, "timeout"},
+		{"op error wrapping deadline", &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}, "timeout"},
+		{"unexpected eof", io.ErrUnexpectedEOF, "error"},
+		{"plain error", errors.New("boom"), "error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := copyErrorKind(tc.err); got != tc.want {
+				t.Errorf("copyErrorKind(%v) = %q, want %q", tc.err, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestStartStdinPipe_ContextCancel(t *testing.T) {

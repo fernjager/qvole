@@ -554,7 +554,7 @@ binds all interfaces. On a multi-tenant
 machine, other local processes could connect to the forward listener and tunnel
 through.
 
-**Mitigation:** The user controls the bind address (`-L 127.0.0.1:8080:host:port`
+**Mitigation:** The user controls the bind address (`-L 127.0.0.1:8080:raddr:rport`
 restricts to loopback). The forwarded connection is cryptographically protected to
 the peer, but the local TCP connection receives no additional authentication; this
 is equivalent to SSH `-L` semantics. The user is responsible for bind-address
@@ -568,19 +568,31 @@ forwarding to an internal service the listener did not intend to expose.
 **Mitigation:** Same as SSH `-R`; the side running the `-R` flag controls which
 target address the peer forwards to. The peer's config is sent over the encrypted
 QUIC control stream, so an external attacker cannot modify it. The receiving side
-should only use `-R` with trusted peers. The `--allow-tunnel` flag (default off)
-must be explicitly passed to accept incoming tunnel connections.
+accepts nothing by default: peer `-R` requests are honored only when the listen
+address matches an `-aL` allowlist entry, and peer `-L` requests only when the
+target matches an `-aF` entry. Non-matching requests are ignored with a warning.
+The `-a` flag (default off) accepts every peer request without matching and is
+intentionally labeled as not safe; it should only be used with trusted peers.
+
+**Allowlist wildcard hosts:** an `-aL`/`-aF` entry with an empty host (e.g.
+`:8081`) matches **any** host on that port. `-aL :8081` therefore lets the peer
+request a listener bound to `0.0.0.0:8081` (all interfaces), and `-aF :8081`
+lets the peer reach any `host:8081` through this machine, including internal
+services and cloud metadata endpoints the operator may not intend to expose.
+Prefer explicit hosts (`127.0.0.1:8081`) unless the wildcard is deliberate.
 
 #### Control Stream Exchange
 
-The peer with tunnel requests opens the control stream, writes its requests, then
-reads the peer's. The peer without requests accepts, reads first, then writes
-its own requests back on the same stream.
+The client side opens the control stream and the server side accepts it. Each
+side writes its requests on the stream and reads the peer's from the same
+stream; both sides order the combined request list identically (the client's
+requests first, then the server's) so the spec index on data streams maps to
+the same request on both peers.
 
 **Mitigation:** Both directions are on the same QUIC connection, authenticated
 by the pinned certificate. An attacker who cannot complete the QUIC handshake
 cannot participate in the control stream exchange. Spec counts are capped at 100
-per side.
+per side, and the exchange is bounded by a 30 s deadline.
 
 #### Tunnel Stream Resource Exhaustion
 
@@ -755,8 +767,8 @@ relay's role as a lightweight, untrusted rendezvous:
 | Property | Raw UDP (current) | QUIC |
 |---|---|---|
 | Per-connection state | `addr + rate limiter` | Congestion control, stream state, TLS session |
-| Connection setup | None (REG packet is first message) | TLS 1.3 handshake (1,200–3,000 B) |
-| Per-message overhead | 0 B (just payload) | 1–20 B (short-header datagram or stream frame) |
+| Connection setup | None (REG packet is first message) | TLS 1.3 handshake (1,200-3,000 B) |
+| Per-message overhead | 0 B (just payload) | 1-20 B (short-header datagram or stream frame) |
 | Typical exchange on wire | ~2,800 B across 12 messages | Handshake alone exceeds the entire exchange |
 | Relay memory per client | ~tens of bytes | ~hundreds of KB (QUIC + TLS state) |
 | Maximum relay concurrency | 200k clients (20/room at configurable limits × 10k rooms) feasible | Impractical without massive memory |
@@ -1078,7 +1090,8 @@ a cosmetic limitation, not a security concern.
 | Traffic analysis identifies peers | Moderate | Loss of anonymity | Fixed message sizes |
 | Relay DoS disrupts rendezvous | High | Denial of service (no confidentiality loss) | Retry with different relay (out of band) |
 | Hole punch spoofing on shared L2 network | Low-Medium | Denial of service (IP-only port matching, first-packet-wins race); no data compromise | TLS fingerprint pinning; reconnect with new code |
-| Forward listener binds to 0.0.0.0 unintentionally | Low | Local privilege escalation | 3-part `-L port:host:port` defaults to 127.0.0.1; 4-part `-L :port:host:port` (empty host) also defaults to 127.0.0.1; explicit `0.0.0.0` still binds all interfaces |
+| Forward listener binds to 0.0.0.0 unintentionally | Low | Local privilege escalation | 3-part `-L lport:raddr:rport` defaults the listen address to 127.0.0.1; 4-part `-L :lport:raddr:rport` (empty listen host) also defaults to 127.0.0.1; explicit `0.0.0.0` still binds all interfaces |
+| Peer requests access to internal services | Low (code-authenticated peer) | Exposure of non-allowlisted local services or listener ports | Per-request `-aL`/`-aF` allowlist; nothing accepted by default; `-a` (allow all) is explicit and not safe. Note: empty-host entries like `:8081` match any host on that port |
 | Cryptographic break of P-256, SHA-256, or TLS 1.3 | Negligible | Full compromise | Standard model; common to all TLS-based systems |
 | Post-quantum adversary | Futuristic | Full compromise | No quantum-resistant primitives; code is not PQ-secure |
 

@@ -23,7 +23,7 @@ const (
 	defaultListenAddr = ":9009"
 )
 
-var version = "0.1.3"
+var version = "0.2.0"
 var debug bool
 
 func main() {
@@ -87,6 +87,78 @@ func resolveCode(flagVal string) (string, error) {
 	return flagVal, nil
 }
 
+// resolveOrGenerateCode returns the connection code, resolving it from the
+// flag or $QVOLE_CODE, or generating a fresh one when absent. When generated,
+// the caller prints it (and optionally a peer command hint) to stderr.
+func resolveOrGenerateCode(flagVal string) (code string, generated bool, err error) {
+	code, err = resolveCode(flagVal)
+	if err != nil || code != "" {
+		return code, false, err
+	}
+	code, err = util.GenerateCode()
+	if err != nil {
+		return "", false, fmt.Errorf("generate code: %w", err)
+	}
+	return code, true, nil
+}
+
+// validateTunnelConfig parses every -L/-R spec and allowlist entry up front so
+// typos fail before a connection code is printed. It mirrors the validation
+// app.RunTunnel performs, with the same error messages.
+func validateTunnelConfig(localTunnels, remoteTunnels, allowListen, allowForward []string, allowAll bool) error {
+	for _, f := range localTunnels {
+		if _, err := app.ParseTunnelRequest(f, "L"); err != nil {
+			return fmt.Errorf("invalid -L spec %q: %w", f, err)
+		}
+	}
+	for _, f := range remoteTunnels {
+		if _, err := app.ParseTunnelRequest(f, "R"); err != nil {
+			return fmt.Errorf("invalid -R spec %q: %w", f, err)
+		}
+	}
+	return (app.TunnelAllow{All: allowAll, Listen: allowListen, Forward: allowForward}).Validate()
+}
+
+// tunnelPeerCommand builds the peer's ready-to-paste tunnel command from our
+// -L/-R requests: each -L needs the peer's -aF <target>, each -R the peer's
+// -aL <listen>. Returns ("", nil) when there is nothing to suggest.
+func tunnelPeerCommand(code string, localTunnels, remoteTunnels []string) (string, error) {
+	seenListen := make(map[string]bool)
+	seenForward := make(map[string]bool)
+	var aL, aF []string
+	for _, spec := range remoteTunnels {
+		req, err := app.ParseTunnelRequest(spec, "R")
+		if err != nil {
+			return "", err
+		}
+		if !seenListen[req.ListenAddr] {
+			seenListen[req.ListenAddr] = true
+			aL = append(aL, req.ListenAddr)
+		}
+	}
+	for _, spec := range localTunnels {
+		req, err := app.ParseTunnelRequest(spec, "L")
+		if err != nil {
+			return "", err
+		}
+		if !seenForward[req.TargetAddr] {
+			seenForward[req.TargetAddr] = true
+			aF = append(aF, req.TargetAddr)
+		}
+	}
+	if len(aL) == 0 && len(aF) == 0 {
+		return "", nil
+	}
+	cmd := "QVOLE_CODE=" + code + " qvole tunnel"
+	for _, v := range aL {
+		cmd += " -aL " + v
+	}
+	for _, v := range aF {
+		cmd += " -aF " + v
+	}
+	return cmd, nil
+}
+
 type commonFlags struct {
 	relay string
 }
@@ -141,9 +213,12 @@ func runPipe(args []string) {
 
 	relayAddr := resolveRelay(cf.relay)
 
-	finalCode, err := resolveCode(*code)
+	finalCode, generated, err := resolveOrGenerateCode(*code)
 	if err != nil {
 		fatalf(util.LogPipe, "%v", err)
+	}
+	if generated {
+		fmt.Fprintf(os.Stderr, "QVOLE_CODE=%s\n", finalCode)
 	}
 
 	ctx, cancel := signalContext()
@@ -182,9 +257,12 @@ func runExec(args []string) error {
 
 	relayAddr := resolveRelay(cf.relay)
 
-	finalCode, err := resolveCode(*code)
+	finalCode, generated, err := resolveOrGenerateCode(*code)
 	if err != nil {
 		fatalf(util.LogExec, "%v", err)
+	}
+	if generated {
+		fmt.Fprintf(os.Stderr, "QVOLE_CODE=%s\n", finalCode)
 	}
 
 	ctx, cancel := signalContext()
@@ -205,11 +283,15 @@ func runTunnel(args []string) {
 	fs := flag.NewFlagSet("tunnel", flag.ContinueOnError)
 	cf := setupCommonFlags(fs)
 	code := fs.String("code", "", "Connection code (or $QVOLE_CODE)")
-	allowTunnel := fs.Bool("allow-tunnel", false, "Allow incoming tunnel streams from peer")
+	allowAll := fs.Bool("a", false, "Allow ALL peer tunnel requests (not safe)")
 	var localTunnels stringSlice
 	var remoteTunnels stringSlice
-	fs.Var(&localTunnels, "L", "Local tunnel request ([addr:]port:host:port)")
-	fs.Var(&remoteTunnels, "R", "Remote tunnel request ([addr:]port:host:port)")
+	var allowListen stringSlice
+	var allowForward stringSlice
+	fs.Var(&localTunnels, "L", "Local tunnel request ([laddr:]lport:raddr:rport)")
+	fs.Var(&remoteTunnels, "R", "Remote tunnel request ([raddr:]rport:laddr:lport)")
+	fs.Var(&allowListen, "aL", "Allow peer to open a listening port on this addr (allow peer's -R; repeatable)")
+	fs.Var(&allowForward, "aF", "Allow peer to connect to the addr:port thru you (allow peer's -L; repeatable)")
 	if err := fs.Parse(args); err != nil {
 		fatalf(util.LogTunnel, "flag: %v", err)
 	}
@@ -217,15 +299,32 @@ func runTunnel(args []string) {
 
 	relayAddr := resolveRelay(cf.relay)
 
-	finalCode, err := resolveCode(*code)
+	// Fail fast on bad -L/-R specs or allowlist entries before printing a
+	// connection code, so the printed code is always accompanied by a
+	// runnable configuration.
+	if err := validateTunnelConfig(localTunnels, remoteTunnels, allowListen, allowForward, *allowAll); err != nil {
+		fatalf(util.LogTunnel, "%v", err)
+	}
+
+	finalCode, generated, err := resolveOrGenerateCode(*code)
 	if err != nil {
 		fatalf(util.LogTunnel, "%v", err)
+	}
+	if generated {
+		fmt.Fprintf(os.Stderr, "QVOLE_CODE=%s\n", finalCode)
+		if hint, herr := tunnelPeerCommand(finalCode, localTunnels, remoteTunnels); herr != nil {
+			// Specs were validated above, so this should not happen; keep the
+			// hint failure visible rather than silently dropping it.
+			fmt.Fprintf(os.Stderr, "peer hint unavailable: %v\n", herr)
+		} else if hint != "" {
+			fmt.Fprintf(os.Stderr, "peer: %s\n", hint)
+		}
 	}
 
 	ctx, cancel := signalContext()
 	defer cancel()
 
-	maybeFatal(util.LogTunnel, app.RunTunnel(ctx, relayAddr, finalCode, localTunnels, remoteTunnels, *allowTunnel, 0))
+	maybeFatal(util.LogTunnel, app.RunTunnel(ctx, relayAddr, finalCode, localTunnels, remoteTunnels, *allowAll, allowListen, allowForward, 0))
 }
 
 func printUsage() {
@@ -233,44 +332,47 @@ func printUsage() {
 
 Commands:
 
-  pipe [--stats]              Bidirectional stream between two peers over QUIC
+  pipe [--stats]                  Bidirectional stream between two peers over QUIC
 
-  tunnel                      TCP port tunneling over P2P QUIC
-    -L [addr:]port:host:port    ...tunnel local port to peer's host:port
-    -R [addr:]port:host:port    ...peer tunnels to your host:port
-    --allow-tunnel              ...accept tunnel requests (peer can connect to your local services)
+  tunnel                          TCP port tunneling over P2P QUIC
+    -L [laddr:]lport:raddr:rport    ...listen on local port, forward to remote addr:port (peer allows with -aF)
+    -R [raddr:]rport:laddr:lport    ...listen on remote port, forward to local addr:port (peer allows with -aL)
+    -aL addr:port                   ...allow peer to open a listening port on this addr (allow peer's -R)
+    -aF addr:port                   ...allow peer to connect to the addr:port thru you (allow peer's -L)
+    -a                              ...allow ALL peer tunnel requests (not safe)
 
-  exec                        Execute a command or connect to an exec peer
-    --cmd                       ...run command, pipe stdin/stdout to peer
+  exec                            Execute a command or connect to an exec peer
+    --cmd                           ...run command, pipe stdin/stdout to peer
 
-  relay                       Relay server (UDP)
-    --listen <addr>             ...listen address (default :9009)
+  relay                           Relay server (UDP)
+    --listen <addr>                ...listen address (default :9009)
 
 Common Flags (pipe / exec / tunnel):
-  --code CODE                 connection code (or $QVOLE_CODE environment var)
-  [--relay addr]              relay server address (host:port)
-  [--debug]                   verbose debug logging to stderr
-  [--stats]                   log TX/RX throughput to stderr every 2 s (pipe-only)
+  --code CODE                     connection code (or $QVOLE_CODE environment var)
+  [--relay addr]                  relay server address (host:port)
+  [--debug]                       verbose debug logging to stderr
+  [--stats]                       log TX/RX throughput to stderr every 2 s (pipe-only)
 
 Examples:
 
   # Send a file
-  alice$ qvole pipe > out                                             # prints connection code, waits for bob
-  bob$   QVOLE_CODE=CODE qvole pipe < in                              # bob connects, sending file to alice
+  alice$ qvole pipe < in                                          # prints connection code, waits for bob
+  bob$   QVOLE_CODE=CODE qvole pipe > out                         # bob connects, receiving file from alice
 
   # Send a directory
-  alice$ tar czf - dir/ | qvole pipe                                  # alice streams tar of dir/ to bob
-  bob$   QVOLE_CODE=CODE qvole pipe | tar xzf -                       # bob receives and extracts
+  alice$ tar czf - dir/ | qvole pipe                              # alice streams tar of dir/ to bob
+  bob$   QVOLE_CODE=CODE qvole pipe | tar xzf -                   # bob receives and extracts
 
   # Port Forwarding
-  alice$ qvole tunnel -L 8080:localhost:80 -R 2222:localhost:22       # alice configures port forwarding requests
-  bob$   QVOLE_CODE=CODE qvole tunnel --allow-tunnel                  # bob needs to explicitly allow tunnels
-  alice$ curl localhost:8080                                          # alice can now reach bob's :80
-  bob$   ssh -p 2222 localhost                                        # bob can now reach alice's sshd
+  alice$ qvole tunnel -L 8080:localhost:80 -R 2222:localhost:22   # alice configures port forwarding requests
+  bob$   QVOLE_CODE=CODE qvole tunnel \
+           -aL 127.0.0.1:2222 -aF localhost:80                    # bob allowlists what alice may reach
+  alice$ curl localhost:8080                                      # alice can now reach bob's :80
+  bob$   ssh -p 2222 localhost                                    # bob can now reach alice's sshd
 
   # Remote command (alice hosts the command, bob connects)
-  alice$ qvole exec --cmd "uptime"                                    # command runs on alice, bob sees output
-  alice$ qvole exec --cmd "script -q bash /dev/null"                 # alice gives bob remote shell
+  alice$ qvole exec --cmd "uptime"                                # command runs on alice, bob sees output
+  alice$ qvole exec --cmd "script -q bash /dev/null"              # alice gives bob remote shell
   bob$   QVOLE_CODE=CODE qvole exec
 
 `)

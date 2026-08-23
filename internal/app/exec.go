@@ -105,6 +105,9 @@ func RunPipeMode(ctx context.Context, conn *quic.Conn, role string) error {
 		if errors.As(err, &appErr) && appErr.ErrorCode == 0 {
 			return nil
 		}
+		if engine.LogDisconnect(util.LogExec, err) {
+			return nil
+		}
 		return err
 	}
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExchangeTunnelConfig_TooManySpecs(t *testing.T) {
@@ -16,7 +17,7 @@ func TestExchangeTunnelConfig_TooManySpecs(t *testing.T) {
 
 	clientConn, _ := setupQUICPair(t)
 
-	_, _, err := ExchangeTunnelConfig(context.Background(), clientConn, reqs, false)
+	_, _, _, err := ExchangeTunnelConfig(context.Background(), clientConn, reqs, TunnelAllow{}, false)
 	if err == nil {
 		t.Fatal("expected error for too many requests")
 	}
@@ -443,12 +444,12 @@ func TestExchangeTunnelConfig_DirectCall(t *testing.T) {
 	serverCh := make(chan result, 1)
 
 	go func() {
-		pa, reqs, err := ExchangeTunnelConfig(context.Background(), clientConn, clientReqs, true)
+		pa, reqs, _, err := ExchangeTunnelConfig(context.Background(), clientConn, clientReqs, TunnelAllow{Listen: []string{"127.0.0.1:8080"}}, false)
 		clientCh <- result{pa, reqs, err}
 	}()
 
 	go func() {
-		pa, reqs, err := ExchangeTunnelConfig(context.Background(), serverConn, nil, false)
+		pa, reqs, _, err := ExchangeTunnelConfig(context.Background(), serverConn, nil, TunnelAllow{}, true)
 		serverCh <- result{pa, reqs, err}
 	}()
 
@@ -493,14 +494,14 @@ func TestExchangeTunnelConfig_ResponderOnly(t *testing.T) {
 	clientCh := make(chan result, 1)
 
 	go func() {
-		pa, reqs, err := ExchangeTunnelConfig(context.Background(), clientConn, []TunnelRequest{
+		pa, reqs, _, err := ExchangeTunnelConfig(context.Background(), clientConn, []TunnelRequest{
 			{Type: "L", ListenAddr: "127.0.0.1:8080", TargetAddr: "8.8.8.8:53"},
-		}, true)
+		}, TunnelAllow{Listen: []string{"127.0.0.1:8080"}}, false)
 		clientCh <- result{pa, reqs, err}
 	}()
 
 	go func() {
-		pa, reqs, err := ExchangeTunnelConfig(context.Background(), serverConn, nil, true)
+		pa, reqs, _, err := ExchangeTunnelConfig(context.Background(), serverConn, nil, TunnelAllow{Listen: []string{"127.0.0.1:9022"}}, true)
 		serverCh <- result{pa, reqs, err}
 	}()
 
@@ -529,6 +530,80 @@ func TestExchangeTunnelConfig_ResponderOnly(t *testing.T) {
 	}
 	if cr.reqs[0].Type != "L" {
 		t.Fatalf("expected type L, got %q", cr.reqs[0].Type)
+	}
+}
+
+func TestExchangeTunnelConfig_BothSidesRequests(t *testing.T) {
+	clientConn, serverConn := setupQUICPair(t)
+
+	clientReqs := []TunnelRequest{
+		{Type: "L", ListenAddr: "127.0.0.1:8080", TargetAddr: "8.8.8.8:53"},
+	}
+	serverReqs := []TunnelRequest{
+		{Type: "R", ListenAddr: "127.0.0.1:9022", TargetAddr: "93.184.216.34:22"},
+	}
+
+	type result struct {
+		accept  bool
+		reqs    []TunnelRequest
+		myStart int
+		err     error
+	}
+
+	// Both sides have requests, so neither can assume it is the sole
+	// initiator. This previously deadlocked until the config timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	clientCh := make(chan result, 1)
+	serverCh := make(chan result, 1)
+
+	go func() {
+		pa, reqs, myStart, err := ExchangeTunnelConfig(ctx, clientConn, clientReqs, TunnelAllow{Listen: []string{"127.0.0.1:8080"}}, false)
+		clientCh <- result{pa, reqs, myStart, err}
+	}()
+
+	go func() {
+		pa, reqs, myStart, err := ExchangeTunnelConfig(ctx, serverConn, serverReqs, TunnelAllow{Listen: []string{"127.0.0.1:9022"}}, true)
+		serverCh <- result{pa, reqs, myStart, err}
+	}()
+
+	cr := <-clientCh
+	sr := <-serverCh
+
+	if cr.err != nil {
+		t.Fatalf("client error: %v", cr.err)
+	}
+	if sr.err != nil {
+		t.Fatalf("server error: %v", sr.err)
+	}
+
+	if !cr.accept || !sr.accept {
+		t.Fatalf("expected peerAccept=true on both sides, got client=%v server=%v", cr.accept, sr.accept)
+	}
+
+	// Each side must receive the peer's request in addition to its own, in a
+	// canonical order: the client's requests come first, then the server's.
+	if len(cr.reqs) != 2 {
+		t.Fatalf("client got %d requests, want 2", len(cr.reqs))
+	}
+	if len(sr.reqs) != 2 {
+		t.Fatalf("server got %d requests, want 2", len(sr.reqs))
+	}
+	if cr.reqs[0].Type != "L" || cr.reqs[1].Type != "R" {
+		t.Fatalf("client request order: %v", cr.reqs)
+	}
+	if sr.reqs[0].Type != "L" || sr.reqs[1].Type != "R" {
+		t.Fatalf("server request order: %v", sr.reqs)
+	}
+
+	// myReqStart locates each side's requests in the shared layout: the
+	// client's at 0, the server's after the client's.
+	if cr.myStart != 0 {
+		t.Fatalf("client myReqStart = %d, want 0", cr.myStart)
+	}
+	if sr.myStart != len(clientReqs) {
+		t.Fatalf("server myReqStart = %d, want %d", sr.myStart, len(clientReqs))
 	}
 }
 

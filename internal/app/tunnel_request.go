@@ -119,7 +119,7 @@ func ParseTunnelRequest(spec, typ string) (*TunnelRequest, error) {
 		listenAddr = net.JoinHostPort(listenHost, parts[1])
 		targetAddr = net.JoinHostPort(stripBrackets(parts[2]), parts[3])
 	default:
-		return nil, fmt.Errorf("expected [addr:]port:host:port format")
+		return nil, fmt.Errorf("expected [laddr:]lport:raddr:rport or [raddr:]rport:laddr:lport format")
 	}
 
 	return &TunnelRequest{Type: typ, ListenAddr: listenAddr, TargetAddr: targetAddr}, nil

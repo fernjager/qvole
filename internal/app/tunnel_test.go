@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -36,7 +37,7 @@ func TestHandleTunnelStream_InvalidIndex(t *testing.T) {
 	// HandleTunnelStream should return quickly without panicking
 	done := make(chan struct{})
 	go func() {
-		HandleTunnelStream(context.Background(), acceptedStream, reqs, 1, true)
+		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, 1, TunnelAllow{}, &sync.Map{})
 		close(done)
 	}()
 
@@ -72,7 +73,7 @@ func TestHandleTunnelStream_WrongDirection(t *testing.T) {
 	// Initiator has type L, so shouldDial = (spec.Type == "R") = false
 	done := make(chan struct{})
 	go func() {
-		HandleTunnelStream(context.Background(), acceptedStream, reqs, 1, true)
+		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, 1, TunnelAllow{}, &sync.Map{})
 		close(done)
 	}()
 
@@ -83,7 +84,7 @@ func TestHandleTunnelStream_WrongDirection(t *testing.T) {
 	}
 }
 
-func TestHandleTunnelStream_AllowTunnelRejection(t *testing.T) {
+func TestHandleTunnelStream_AllowlistRejection(t *testing.T) {
 	clientConn, serverConn := setupQUICPair(t)
 
 	reqs := []TunnelRequest{
@@ -105,17 +106,83 @@ func TestHandleTunnelStream_AllowTunnelRejection(t *testing.T) {
 		t.Fatalf("accept stream: %v", err)
 	}
 
-	// Peer spec (myReqCount=0), allowTunnel=false → should reject without dialing
+	// Peer -L spec (myReqCount=0) targeting 8.8.8.8:53 with an empty
+	// --allow-forward allowlist → should reject without dialing.
 	done := make(chan struct{})
 	go func() {
-		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, false)
+		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, 0, TunnelAllow{}, &sync.Map{})
 		close(done)
 	}()
+	waitDone(t, done, "rejected tunnel")
 
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("HandleTunnelStream did not return for rejected tunnel")
+	// With the target allowlisted, the stream is dialed (to an unroutable
+	// address, so HandleTunnelStream returns via dial failure, not rejection).
+	reqs[0].TargetAddr = "192.0.2.1:9999"
+	stream2, err := clientConn.OpenStreamSync(context.Background())
+	if err != nil {
+		t.Fatalf("open stream: %v", err)
+	}
+	var header2 [2]byte
+	binary.BigEndian.PutUint16(header2[:], 0)
+	stream2.Write(header2[:])
+	stream2.Close()
+
+	acceptedStream2, err := serverConn.AcceptStream(context.Background())
+	if err != nil {
+		t.Fatalf("accept stream: %v", err)
+	}
+	done2 := make(chan struct{})
+	go func() {
+		HandleTunnelStream(context.Background(), acceptedStream2, reqs, 0, 0, TunnelAllow{Forward: []string{"192.0.2.1:9999"}}, &sync.Map{})
+		close(done2)
+	}()
+	waitDone(t, done2, "allowlisted tunnel")
+}
+
+func TestAnnounceTunnelOnce(t *testing.T) {
+	// Each session has its own map; the test builds its own so it is hermetic
+	// and independent of any other session state.
+	announced := &sync.Map{}
+
+	const idx = 7
+	const n = 32
+	var wg sync.WaitGroup
+	results := make([]bool, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i] = announceTunnelOnce(announced, idx, "localhost:8080")
+		}(i)
+	}
+	wg.Wait()
+
+	firsts := 0
+	for _, r := range results {
+		if r {
+			firsts++
+		}
+	}
+	if firsts != 1 {
+		t.Fatalf("exactly one goroutine should announce, got %d", firsts)
+	}
+
+	// A different spec announces independently; repeats stay silent.
+	if !announceTunnelOnce(announced, idx+1, "localhost:80") {
+		t.Fatal("new spec should announce on first connection")
+	}
+	if announceTunnelOnce(announced, idx+1, "localhost:80") {
+		t.Fatal("spec should not announce again")
+	}
+
+	// A separate session map announces independently of the first session,
+	// including for the same spec index (per-session state, not global).
+	other := &sync.Map{}
+	if !announceTunnelOnce(other, idx, "localhost:9090") {
+		t.Fatal("a fresh session should announce again for the same spec index")
+	}
+	if announceTunnelOnce(other, idx, "localhost:9090") {
+		t.Fatal("spec should not announce twice within one session")
 	}
 }
 
@@ -262,7 +329,7 @@ func TestHandleTunnelStream_DialTimeout(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, true)
+		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, 0, TunnelAllow{}, &sync.Map{})
 		close(done)
 	}()
 
@@ -294,7 +361,7 @@ func TestHandleTunnelStream_ShortHeader(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		HandleTunnelStream(context.Background(), acceptedStream, reqs, 1, true)
+		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, 1, TunnelAllow{}, &sync.Map{})
 		close(done)
 	}()
 
@@ -330,7 +397,7 @@ func TestHandleTunnelStream_PeerRType(t *testing.T) {
 	// myReqCount=0: this is a peer spec; req.Type == "R" && !myReq → return without dialing
 	done := make(chan struct{})
 	go func() {
-		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, true)
+		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, 0, TunnelAllow{}, &sync.Map{})
 		close(done)
 	}()
 
@@ -348,15 +415,16 @@ func TestTunnelRunStreamAcceptor_ConnectionClosed(t *testing.T) {
 		{Type: "L", ListenAddr: "127.0.0.1:8080", TargetAddr: "8.8.8.8:53"},
 	}
 
-	// Close the connection so AcceptStream returns an error
+	// Close the connection with a peer application error: this is a remote
+	// disconnect, not a fatal error, so RunStreamAcceptor should end cleanly.
 	clientConn.CloseWithError(1, "test")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	err := RunStreamAcceptor(ctx, serverConn, reqs, 1, true, 200)
-	if err == nil {
-		t.Fatal("expected error from RunStreamAcceptor with closed connection")
+	err := RunStreamAcceptor(ctx, serverConn, reqs, 0, 1, TunnelAllow{}, 200, &sync.Map{})
+	if err != nil {
+		t.Fatalf("expected nil error on peer disconnect, got %v", err)
 	}
 }
 
@@ -379,7 +447,7 @@ func TestTunnelRunTCPListeners_BindFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	err = RunTCPListeners(ctx, serverConn, reqs, 1, true, true)
+	err = RunTCPListeners(ctx, serverConn, reqs, 0, 1, true, TunnelAllow{})
 	if err == nil {
 		t.Fatal("expected error for port already in use")
 	}

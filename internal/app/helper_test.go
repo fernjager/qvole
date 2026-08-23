@@ -4,12 +4,23 @@ import (
 	"context"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/quic-go/quic-go"
 
 	"github.com/fernjager/qvole/internal/engine"
 	"github.com/fernjager/qvole/internal/util"
 )
+
+// waitDone waits for ch to close or fails the test after 15 s.
+func waitDone(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("%s did not complete", what)
+	}
+}
 
 func setupQUICPair(t *testing.T) (clientConn *quic.Conn, serverConn *quic.Conn) {
 	t.Helper()

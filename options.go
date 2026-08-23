@@ -19,7 +19,9 @@ type options struct {
 	cmdMode           bool
 	localTunnels      []string
 	remoteTunnels     []string
-	allowTunnel       bool
+	allowAll          bool
+	allowListen       []string
+	allowForward      []string
 }
 
 func defaultOptions() *options {
@@ -94,18 +96,37 @@ func WithCmdMode(b bool) Option {
 }
 
 // WithLocalTunnel adds a local port-forwarding tunnel specification
-// in the format [addr:]port:host:port.
+// in the format [laddr:]lport:raddr:rport.
 func WithLocalTunnel(spec string) Option {
 	return func(o *options) { o.localTunnels = append(o.localTunnels, spec) }
 }
 
 // WithRemoteTunnel adds a remote port-forwarding tunnel specification
-// in the format [addr:]port:host:port.
+// in the format [raddr:]rport:laddr:lport.
 func WithRemoteTunnel(spec string) Option {
 	return func(o *options) { o.remoteTunnels = append(o.remoteTunnels, spec) }
 }
 
-// WithAllowTunnel sets whether tunnel requests from the peer are accepted.
-func WithAllowTunnel(b bool) Option {
-	return func(o *options) { o.allowTunnel = b }
+// WithAllowAll accepts every peer tunnel request without matching. This is the
+// "allow anything" mode (not safe): the peer may open arbitrary listening ports
+// and reach arbitrary addresses through this machine. Prefer WithAllowListen /
+// WithAllowForward.
+func WithAllowAll(b bool) Option {
+	return func(o *options) { o.allowAll = b }
+}
+
+// WithAllowListen allowlists an addr:port on which the peer may ask this side
+// to open a listening port (honors the peer's -R request for that address).
+// Repeatable. Without any allowlist entries (or WithAllowAll), no peer tunnel
+// requests are accepted.
+func WithAllowListen(addrPort string) Option {
+	return func(o *options) { o.allowListen = append(o.allowListen, addrPort) }
+}
+
+// WithAllowForward allowlists an addr:port that the peer may reach through
+// this side (honors the peer's -L request targeting that address). Repeatable.
+// Without any allowlist entries (or WithAllowAll), no peer tunnel requests are
+// accepted.
+func WithAllowForward(addrPort string) Option {
+	return func(o *options) { o.allowForward = append(o.allowForward, addrPort) }
 }

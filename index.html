@@ -164,7 +164,7 @@
       </div>
       <div class="feature">
         <h2><code>tunnel</code></h2>
-        <p>TCP port forwarding with -L and -R flags. Bind services to localhost and reach them on demand.</p>
+        <p>TCP port forwarding with -L and -R flags. Nothing is exposed by default; the peer must allowlist exactly what you may reach (-aL/-aF).</p>
       </div>
       <div class="feature">
         <h2><code>exec</code></h2>
@@ -180,14 +180,14 @@
       <h2>Quick Start</h2>
       <div class="example">
         <div class="label">Send a file</div>
-        <pre><code><span class="prompt">alice$</span> qvole pipe &gt; out
+        <pre><code><span class="prompt">alice$</span> qvole pipe &lt; in
 <span class="comment"># prints connection code, waits for bob</span>
-<span class="prompt">bob$</span>   QVOLE_CODE=CODE qvole pipe &lt; in</code></pre>
+<span class="prompt">bob$</span>   QVOLE_CODE=CODE qvole pipe &gt; out</code></pre>
       </div>
       <div class="example">
         <div class="label">Port forwarding</div>
         <pre><code><span class="prompt">alice$</span> qvole tunnel -L 8080:localhost:80 -R 2222:localhost:22
-<span class="prompt">bob$</span>   QVOLE_CODE=CODE qvole tunnel --allow-tunnel
+<span class="prompt">bob$</span>   QVOLE_CODE=CODE qvole tunnel -aL 127.0.0.1:2222 -aF localhost:80
 <span class="prompt">alice$</span> curl localhost:8080    <span class="comment"># reaches bob's :80</span>
 <span class="prompt">bob$</span>   ssh -p 2222 localhost <span class="comment"># reaches alice's sshd</span></code></pre>
       </div>

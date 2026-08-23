@@ -149,14 +149,16 @@ func Exec(ctx context.Context, opts ...Option) error {
 }
 
 // Tunnel establishes port-forwarding tunnels between peers. Use WithLocalTunnel
-// and WithRemoteTunnel to specify forwarding rules. Code is required.
+// and WithRemoteTunnel to specify forwarding rules, and WithAllowListen /
+// WithAllowForward (or WithAllowAll, which is not safe) to control which peer
+// requests are honored. Code is required.
 func Tunnel(ctx context.Context, opts ...Option) error {
 	o := resolveOptions(opts)
 	if err := validate(o); err != nil {
 		return err
 	}
 	cfg := toPeerConfig(o)
-	return app.RunTunnel(ctx, o.relay, o.code, o.localTunnels, o.remoteTunnels, o.allowTunnel, cfg.ForwardMaxStreams)
+	return app.RunTunnel(ctx, o.relay, o.code, o.localTunnels, o.remoteTunnels, o.allowAll, o.allowListen, o.allowForward, cfg.ForwardMaxStreams)
 }
 
 // TunnelRequest represents a single port-forwarding tunnel specification.

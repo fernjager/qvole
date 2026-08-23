@@ -29,6 +29,60 @@ func isClosedError(err error) bool {
 	return false
 }
 
+// isTimeoutError reports whether err is a benign deadline or timeout error,
+// which occurs when a tunnel connection hits its absolute lifetime cap and the
+// copy deadlines expire. The tunnel itself remains healthy.
+func isTimeoutError(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
+// copyErrorKind classifies a copy error for logging: "" means benign teardown
+// (no log), otherwise one of "timeout", "disconnect", or "error".
+//   - graceful remote close (quic.ApplicationError with code 0) → "" (normal
+//     end of session, e.g. CloseWithError(0, "done"));
+//   - peer disconnect (non-zero application error, idle timeout, stateless
+//     reset, transport error) → "disconnect", logged at debug level;
+//   - plain local close races (net.ErrClosed / io.ErrClosedPipe) → "";
+//   - deadline/timeout errors (tunnel lifetime cap) → "timeout";
+//   - everything else → "error".
+func copyErrorKind(err error) string {
+	if err == nil {
+		return ""
+	}
+	var appErr *quic.ApplicationError
+	if errors.As(err, &appErr) && appErr.ErrorCode == 0 {
+		return "" // graceful remote close
+	}
+	if engine.IsPeerDisconnect(err) {
+		return "disconnect"
+	}
+	if isClosedError(err) {
+		return "" // benign local close race during shutdown
+	}
+	if isTimeoutError(err) {
+		return "timeout"
+	}
+	return "error"
+}
+
+// copyDirection copies src to dst, treating benign close and timeout errors as
+// expected teardown (logged only at debug level) and everything else as an error.
+func copyDirection(dst, src io.ReadWriter, dir string) {
+	buf := engine.BufferPool.Get().([]byte)
+	defer engine.PutBuffer(buf)
+	if _, err := io.CopyBuffer(dst, src, buf); err != nil {
+		switch copyErrorKind(err) {
+		case "timeout":
+			util.LogCopy.Printf("Copy timeout (%s): %v", dir, err)
+		case "disconnect":
+			util.LogCopy.Printf("Copy disconnect (%s): %v", dir, err)
+		case "error":
+			util.LogCopy.PrintfError("Copy error (%s): %v", dir, err)
+		}
+	}
+}
+
 func bidirectionalCopy(a, b io.ReadWriter) {
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -47,21 +101,13 @@ func bidirectionalCopy(a, b io.ReadWriter) {
 
 	go func() {
 		defer wg.Done()
-		buf := engine.BufferPool.Get().([]byte)
-		defer engine.PutBuffer(buf)
-		if _, err := io.CopyBuffer(a, b, buf); err != nil && !isClosedError(err) {
-			util.LogCopy.PrintfError("Copy error (a←b): %v", err)
-		}
+		copyDirection(a, b, "a←b")
 		closeBoth()
 	}()
 
 	go func() {
 		defer wg.Done()
-		buf := engine.BufferPool.Get().([]byte)
-		defer engine.PutBuffer(buf)
-		if _, err := io.CopyBuffer(b, a, buf); err != nil && !isClosedError(err) {
-			util.LogCopy.PrintfError("Copy error (b←a): %v", err)
-		}
+		copyDirection(b, a, "b←a")
 		closeBoth()
 	}()
 

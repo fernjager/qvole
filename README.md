@@ -22,16 +22,16 @@ See [examples](#pipe) further below for more inspiration!
 
 ```bash
 # Send a file
-alice$ qvole pipe > out                                         # prints connection code, waits for bob
-bob$   QVOLE_CODE=CODE qvole pipe < in                          # bob connects with code, sends file to alice
+alice$ qvole pipe < in                                           # prints connection code, waits for bob
+bob$   QVOLE_CODE=CODE qvole pipe > out                          # bob connects, receiving file from alice
 
 # Send a directory
 alice$ tar czf - dir/ | qvole pipe                              # alice streams tar of dir/ to bob
 bob$   QVOLE_CODE=CODE qvole pipe | tar xzf -                   # bob receives and extracts dir/
 
 # Port Forwarding
-alice$ qvole tunnel -L 8080:localhost:80 -R 2222:localhost:22   # alice sets up config, bob accepts
-bob$   QVOLE_CODE=CODE qvole tunnel --allow-tunnel
+alice$ qvole tunnel -L 8080:localhost:80 -R 2222:localhost:22   # alice sets up config, bob allowlists
+bob$   QVOLE_CODE=CODE qvole tunnel -aL 127.0.0.1:2222 -aF localhost:80
 alice$ curl localhost:8080                                      # reaches bob's :80
 bob$   ssh -p 2222 localhost                                    # reaches alice's sshd
 
@@ -216,11 +216,19 @@ qvole.Exec(ctx,
     qvole.WithCommand("uptime"), qvole.WithCmdMode(true),
 )
 
-// Port forwarding
+// Port forwarding: Alice listens on 8080 locally and forwards to Bob's :80.
+// Bob must allowlist that target with qvole.WithAllowForward("localhost:80").
 qvole.Tunnel(ctx,
     qvole.WithCode("secret"),
     qvole.WithRelay("relay.qvole.dev:9009"),
-    qvole.WithLocalTunnel("8080:localhost:80"), qvole.WithAllowTunnel(true),
+    qvole.WithLocalTunnel("8080:localhost:80"),
+)
+
+// Bob (peer side): allowlist what Alice may reach through this machine.
+qvole.Tunnel(ctx,
+    qvole.WithCode("secret"),
+    qvole.WithRelay("relay.qvole.dev:9009"),
+    qvole.WithAllowForward("localhost:80"),
 )
 
 // Run your own relay
@@ -388,35 +396,50 @@ TCP port tunneling over QUIC tunnels, modeled after SSH `-L` and `-R`.
 
 | Flag | Description |
 |------|-------------|
-| `-L [addr:]port:host:port` | Listen on `[addr:]port`, forward connections to `host:port` on the peer's side |
-| `-R [addr:]port:host:port` | Peer listens on `[addr:]port`, forwards connections to `host:port` on your side |
+| `-L [laddr:]lport:raddr:rport` | Listen on local `[laddr:]lport`, forward to remote `raddr:rport` (peer allows with `-aF`) |
+| `-R [raddr:]rport:laddr:lport` | Peer listens on remote `[raddr:]rport`, forwards to local `laddr:lport` (peer allows with `-aL`) |
+| `-aL addr:port` | Allow peer to open a listening port on this addr (allow peer's `-R`; repeatable) |
+| `-aF addr:port` | Allow peer to connect to the addr:port thru you (allow peer's `-L`; repeatable) |
+| `-a` | Allow **all** peer tunnel requests (not safe): the peer can open arbitrary ports and reach arbitrary addresses through your machine |
 | `--code CODE` | Connection code (or `$QVOLE_CODE`) |
 | `--relay addr` | Relay address (host:port) |
-| `--allow-tunnel` | Accept incoming tunnel connections |
 | `--debug` | Verbose debug logging to stderr |
 
-Multiple `-L` and `-R` flags can be combined.
+Multiple `-L` and `-R` flags can be combined. Nothing is accepted by default:
+your `-L` requests need the peer to run with `-aF <target>`, and your `-R`
+requests need the peer to run with `-aL <listen addr>`.
+
+The peer's acceptance signal is per-side, not per-request: if the peer has a
+allowlist that does not cover one of your requests, your listener may still
+bind, but every connection through it is rejected on the peer's side (the peer
+logs `Tunnel rejected: … (add -aF …)`). When a peer runs with no allowlist at
+all, your side logs exactly which flag the peer must run.
+
+An `-aL`/`-aF` entry with an empty host (e.g. `:8081`) matches **any** host on
+that port, so `-aL :8081` lets the peer bind `0.0.0.0:8081` and `-aF :8081`
+lets the peer reach any `host:8081` through your machine. Use explicit hosts
+(`127.0.0.1:8081`) unless the wildcard is deliberate.
 
 ```bash
-# Alice listens on 8080, forwards to Bob's :80
+# Alice listens on 8080, forwards to Bob's :80 (Bob needs -aF for the target)
 alice$ qvole tunnel -L 8080:localhost:80
-bob$   QVOLE_CODE=CODE qvole tunnel --allow-tunnel
+bob$   QVOLE_CODE=CODE qvole tunnel -aF localhost:80
 
-# Alice asks Bob to listen on 9022 and forward back to Alice's :22
+# Alice asks Bob to listen on 9022 and forward back to Alice's :22 (Bob needs -aL for the port)
 alice$ qvole tunnel -R 9022:localhost:22
-bob$   QVOLE_CODE=CODE qvole tunnel --allow-tunnel
+bob$   QVOLE_CODE=CODE qvole tunnel -aL 127.0.0.1:9022
 
 # Combined: Alice gets Bob's :80 on :8080 AND Bob gets Alice's :22 on :9022
 alice$ qvole tunnel -L 8080:localhost:80 -R 9022:localhost:22
-bob$   QVOLE_CODE=CODE qvole tunnel --allow-tunnel
+bob$   QVOLE_CODE=CODE qvole tunnel -aL 127.0.0.1:9022 -aF localhost:80
 ```
 
 | Flag form | Meaning |
 |-----------|---------|
-| `-L port:host:port` | Listen on `127.0.0.1:port`, forward to `host:port` on peer |
-| `-L addr:port:host:port` | Listen on `addr:port`, forward to `host:port` on peer |
-| `-R port:host:port` | Peer listens on `127.0.0.1:port`, forwards to `host:port` on your side |
-| `-R addr:port:host:port` | Peer listens on `addr:port`, forwards to `host:port` on your side |
+| `-L lport:raddr:rport` | Listen on `127.0.0.1:lport`, forward to `raddr:rport` on peer |
+| `-L laddr:lport:raddr:rport` | Listen on `laddr:lport`, forward to `raddr:rport` on peer |
+| `-R rport:laddr:lport` | Peer listens on `127.0.0.1:rport`, forwards to `laddr:lport` on your side |
+| `-R raddr:rport:laddr:lport` | Peer listens on `raddr:rport`, forwards to `laddr:lport` on your side |
 
 **Examples:**
 
@@ -426,46 +449,46 @@ Point-to-point between exactly two peers; forward-secret across restarts.
 ```bash
 # Postgres: remote database access
 alice$ qvole tunnel -L 5432:localhost:5432
-bob$   QVOLE_CODE=CODE qvole tunnel --allow-tunnel
+bob$   QVOLE_CODE=CODE qvole tunnel -aF localhost:5432
 
 # Remote desktop: tunnel VNC over the P2P link
 alice$ qvole tunnel -L 5900:localhost:5900
-bob$   QVOLE_CODE=CODE qvole tunnel --allow-tunnel
+bob$   QVOLE_CODE=CODE qvole tunnel -aF localhost:5900
 
 # Remote Docker daemon: no exposed TCP socket needed
 alice$ qvole tunnel -L 2375:localhost:2375
-bob$   QVOLE_CODE=CODE qvole tunnel --allow-tunnel
+bob$   QVOLE_CODE=CODE qvole tunnel -aF localhost:2375
 
 # SOCKS proxy: route traffic through the peer's network
 alice$ ssh -D 1080 localhost -N                      # start local SOCKS proxy
 alice$ qvole tunnel -R 1080:localhost:1080           # expose it to Bob
-bob$   QVOLE_CODE=CODE qvole tunnel --allow-tunnel   # Bob now has SOCKS on :1080
+bob$   QVOLE_CODE=CODE qvole tunnel -aL 127.0.0.1:1080   # Bob now has SOCKS on :1080
 
 # Monitoring stack: reach Prometheus/Grafana behind NAT
 alice$ qvole tunnel -L 9090:localhost:9090 -L 3000:localhost:3000
-bob$   QVOLE_CODE=CODE qvole tunnel --allow-tunnel
+bob$   QVOLE_CODE=CODE qvole tunnel -aF localhost:9090 -aF localhost:3000
 
 # Media server: watch Plex/Jellyfin on a remote TV
 alice$ qvole tunnel -L 32400:localhost:32400
-bob$   QVOLE_CODE=CODE qvole tunnel --allow-tunnel
+bob$   QVOLE_CODE=CODE qvole tunnel -aF localhost:32400
 
 # SSH escape hatch: expose sshd on a locked-down machine
 alice$ qvole tunnel -R 2222:localhost:22
-bob$   QVOLE_CODE=CODE qvole tunnel --allow-tunnel
+bob$   QVOLE_CODE=CODE qvole tunnel -aL 127.0.0.1:2222
 bob$   ssh -p 2222 localhost                         # Bob reaches Alice's sshd
 
 # Game servers: host a Minecraft server behind NAT
 alice$ qvole tunnel -L 25565:localhost:25565
-bob$   QVOLE_CODE=CODE qvole tunnel --allow-tunnel
+bob$   QVOLE_CODE=CODE qvole tunnel -aF localhost:25565
 
 # Redis: access a remote Redis instance
 alice$ qvole tunnel -L 6379:localhost:6379
-bob$   QVOLE_CODE=CODE qvole tunnel --allow-tunnel
+bob$   QVOLE_CODE=CODE qvole tunnel -aF localhost:6379
 
 # Web dev preview: expose a local dev server to a peer
 alice$ npm run dev                                   # running on :3000
 alice$ qvole tunnel -R 3000:localhost:3000           # Alice exposes her :3000 to Bob
-bob$   QVOLE_CODE=CODE qvole tunnel --allow-tunnel   # Bob can now visit localhost:3000
+bob$   QVOLE_CODE=CODE qvole tunnel -aL 127.0.0.1:3000   # Bob can now visit localhost:3000
 ```
 
 

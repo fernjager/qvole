@@ -170,14 +170,43 @@ func TestWithRemoteTunnel(t *testing.T) {
 	}
 }
 
-func TestWithAllowTunnel(t *testing.T) {
+func TestWithAllowAll(t *testing.T) {
 	o := defaultOptions()
-	if o.allowTunnel {
-		t.Error("allowTunnel should be false by default")
+	if o.allowAll {
+		t.Error("allowAll should be false by default")
 	}
-	WithAllowTunnel(true)(o)
-	if !o.allowTunnel {
-		t.Error("allowTunnel should be true")
+	WithAllowAll(true)(o)
+	if !o.allowAll {
+		t.Error("allowAll should be true")
+	}
+}
+
+func TestWithAllowListen(t *testing.T) {
+	o := defaultOptions()
+	if len(o.allowListen) != 0 {
+		t.Error("allowListen should be empty by default")
+	}
+	WithAllowListen("127.0.0.1:2222")(o)
+	WithAllowListen(":8080")(o)
+	if len(o.allowListen) != 2 {
+		t.Errorf("allowListen = %d entries, want 2", len(o.allowListen))
+	}
+	if o.allowListen[0] != "127.0.0.1:2222" {
+		t.Errorf("allowListen[0] = %q", o.allowListen[0])
+	}
+}
+
+func TestWithAllowForward(t *testing.T) {
+	o := defaultOptions()
+	if len(o.allowForward) != 0 {
+		t.Error("allowForward should be empty by default")
+	}
+	WithAllowForward("localhost:80")(o)
+	if len(o.allowForward) != 1 {
+		t.Errorf("allowForward = %d entries, want 1", len(o.allowForward))
+	}
+	if o.allowForward[0] != "localhost:80" {
+		t.Errorf("allowForward[0] = %q", o.allowForward[0])
 	}
 }
 

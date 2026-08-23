@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-08-23
+
+### Security
+- Tunnel requests are denied by default: peer `-L`/`-R` requests are honored only against explicit `-aL` (listen) / `-aF` (forward) allowlist entries, or `-a` (allow all, not safe). Removed `--allow-tunnel`; library `WithAllowTunnel` replaced by `WithAllowListen`/`WithAllowForward`/`WithAllowAll` (breaking API). Invalid entries fail fast; denied requests log the exact flag to run.
+
+### Added
+- Generated codes print the peer's ready-to-paste command (`QVOLE_CODE=… qvole tunnel -aL … -aF …`).
+
+### Changed
+- Tunnel exchange: the client opens the control stream, the server accepts; both sides order requests canonically, so both-peers-request tunnels work (previously deadlocked) and stream indexes map consistently. Requires 0.2.0+ on both sides.
+- Disconnect handling: remote disconnects print `Remote host disconnected` (detail only with `--debug`); local SIGINT exits quietly; tunnel bind failures surface as errors instead of exiting silently.
+- Logging: `Tunnel established: ↔ target` once per spec, `Tunnel forwarding to <target>` on the dialing side, `Received N tunnel request(s) from peer` on both sides, `Awaiting tunnel request(s) from peer` when no requests are configured; per-connection and copy teardown logs only with `--debug`.
+- Version 0.2.0, including the 0.1.4 toolchain bumps (Go 1.27, x/crypto v0.55, x/net v0.58, golangci-lint v2.13.1). Wire format unchanged (ALPN `qvole-v0.1`); tunnel sessions require 0.2.0+ on both sides, pipe/exec remain interoperable with 0.1.x.
+
+### Docs
+- README, SECURITY, PROTOCOL, LIBRARY, and the static site updated for the allowlist model.
+
 ## [0.1.4] - 2026-08-22
 
 ### Changed

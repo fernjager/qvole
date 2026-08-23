@@ -30,7 +30,7 @@ func runTunnelRemote(t *testing.T, echoPort, tunnelPort int, payload string, cod
 	initLogF, _ := os.Create(initLog)
 
 	args := []string{"tunnel"}
-	args = append(args, clientModeArgs(relayAddr, "--code", code, "--allow-tunnel")...)
+	args = append(args, clientModeArgs(relayAddr, "--code", code, "-aL", tunnelAddr)...)
 	initCmd := exec.Command(qvoleBin, args...)
 	initCmd.Stderr = initLogF
 	if err := initCmd.Start(); err != nil {
@@ -107,6 +107,7 @@ func TestTunnelMulti(t *testing.T) {
 	echoPort1 := 19019
 	echoPort2 := 19020
 	fwdPort := 19021
+	fwdPort2 := fwdPort + 1
 	code := "9918-alpha-bravo-charlie"
 
 	_, echoClose1 := startEchoServer(t, fmt.Sprintf("127.0.0.1:%d", echoPort1))
@@ -121,7 +122,7 @@ func TestTunnelMulti(t *testing.T) {
 	peerLog := filepath.Join(logDir, "peer_stderr.log")
 	peerLogF, _ := os.Create(peerLog)
 	args := []string{"tunnel"}
-	args = append(args, clientModeArgs(relayAddr, "--code", code, "--allow-tunnel")...)
+	args = append(args, clientModeArgs(relayAddr, "--code", code, "-aL", fmt.Sprintf("127.0.0.1:%d", fwdPort), "-aL", fmt.Sprintf("127.0.0.1:%d", fwdPort2))...)
 	peerCmd := exec.Command(qvoleBin, args...)
 	peerCmd.Stderr = peerLogF
 	if err := peerCmd.Start(); err != nil {
@@ -131,7 +132,6 @@ func TestTunnelMulti(t *testing.T) {
 	peerLogF.Close()
 	time.Sleep(1 * time.Second)
 
-	fwdPort2 := fwdPort + 1
 	initLog := filepath.Join(logDir, "init_stderr.log")
 	initLogF, _ := os.Create(initLog)
 	args = []string{"tunnel"}
@@ -204,7 +204,7 @@ func TestTunnelLocal(t *testing.T) {
 	peerLog := filepath.Join(logDir, "peer_stderr.log")
 	peerLogF, _ := os.Create(peerLog)
 	args := []string{"tunnel"}
-	args = append(args, clientModeArgs(relayAddr, "--code", code, "--allow-tunnel")...)
+	args = append(args, clientModeArgs(relayAddr, "--code", code, "-aF", fmt.Sprintf("127.0.0.1:%d", echoPort))...)
 	peerCmd := exec.Command(qvoleBin, args...)
 	peerCmd.Stderr = peerLogF
 	peerCmd.Env = os.Environ()
@@ -275,7 +275,7 @@ func TestTunnelAllowReject(t *testing.T) {
 	defer cleanup()
 
 	fwdPort := 19031
-	code := "9930-allow-tunnel-reject"
+	code := "9930-allowlist-reject"
 
 	peerLog := filepath.Join(t.TempDir(), "peer_stderr.log")
 	peerLogF, _ := os.Create(peerLog)
@@ -318,7 +318,7 @@ func TestTunnelAllowReject(t *testing.T) {
 		return
 	}
 
-	t.Fatal("tunnel allowed data flow without --allow-tunnel on recipient")
+	t.Fatal("tunnel allowed data flow without -aL/-aF on recipient")
 }
 
 func TestTunnelMixedLR(t *testing.T) {
@@ -330,7 +330,7 @@ func TestTunnelMixedLR(t *testing.T) {
 	code := "9933-mixed-lr-test"
 
 	args := []string{"tunnel"}
-	args = append(args, clientModeArgs(relayAddr, "--code", code, "--allow-tunnel")...)
+	args = append(args, clientModeArgs(relayAddr, "--code", code, "-aF", "127.0.0.1:9999", "-aL", fmt.Sprintf("127.0.0.1:%d", rPort))...)
 	peerCmd := exec.Command(qvoleBin, args...)
 	peerCmd.Stdin = strings.NewReader("")
 	peerCmd.Stderr = &logWriter{t: t, prefix: "[peer-stderr] "}
@@ -376,7 +376,7 @@ func TestTunnelTargetDown(t *testing.T) {
 	peerLog := filepath.Join(t.TempDir(), "peer_stderr.log")
 	peerLogF, _ := os.Create(peerLog)
 	args := []string{"tunnel"}
-	args = append(args, clientModeArgs(relayAddr, "--code", code, "--allow-tunnel")...)
+	args = append(args, clientModeArgs(relayAddr, "--code", code, "-aF", "127.0.0.1:19999")...)
 	peerCmd := exec.Command(qvoleBin, args...)
 	peerCmd.Stdin = strings.NewReader("")
 	peerCmd.Stderr = peerLogF
@@ -419,5 +419,190 @@ func TestTunnelTargetDown(t *testing.T) {
 
 	if readErr == nil {
 		t.Error("expected error when tunnel target is down, got successful read")
+	}
+}
+
+// TestTunnelBindFailure verifies that a bind failure on the -aL side surfaces
+// as an error on that side (not a silent exit) and that the requesting side
+// reports the peer's disconnect.
+func TestTunnelBindFailure(t *testing.T) {
+	relayAddr, cleanup := testRelay(t)
+	defer cleanup()
+
+	// Occupy a port so the -aL side cannot bind it.
+	occupiedPort := 19051
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", occupiedPort))
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	targetPort := 19052
+	code := "9951-bind-failure"
+
+	// -aL side: allowlists the occupied port; its bind must fail loudly.
+	serverLog := filepath.Join(t.TempDir(), "server_stderr.log")
+	serverLogF, _ := os.Create(serverLog)
+	serverArgs := []string{"tunnel"}
+	serverArgs = append(serverArgs, clientModeArgs(relayAddr, "--code", code, "-aL", fmt.Sprintf("127.0.0.1:%d", occupiedPort))...)
+	serverCmd := exec.Command(qvoleBin, serverArgs...)
+	serverCmd.Stderr = serverLogF
+	if err := serverCmd.Start(); err != nil {
+		t.Fatalf("start server: %v", err)
+	}
+	serverLogF.Close()
+
+	// -R side: requests the occupied port; it should notice the disconnect.
+	clientLog := filepath.Join(t.TempDir(), "client_stderr.log")
+	clientLogF, _ := os.Create(clientLog)
+	clientArgs := []string{"tunnel"}
+	clientArgs = append(clientArgs, clientModeArgs(relayAddr, "--code", code,
+		"-R", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", occupiedPort, targetPort))...)
+	clientCmd := exec.Command(qvoleBin, clientArgs...)
+	clientCmd.Stderr = clientLogF
+	if err := clientCmd.Start(); err != nil {
+		t.Fatalf("start client: %v", err)
+	}
+	clientLogF.Close()
+
+	// The -aL side must exit with a bind error, not silently.
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- serverCmd.Wait() }()
+	select {
+	case err := <-serverDone:
+		if err == nil {
+			serverData, _ := os.ReadFile(serverLog)
+			t.Fatalf("expected bind failure on -aL side, exited cleanly:\n%s", serverData)
+		}
+		serverData, _ := os.ReadFile(serverLog)
+		if !strings.Contains(string(serverData), fmt.Sprintf("listen on 127.0.0.1:%d", occupiedPort)) {
+			t.Fatalf("-aL side log missing bind error:\n%s", serverData)
+		}
+	case <-time.After(30 * time.Second):
+		serverCmd.Process.Kill()
+		serverData, _ := os.ReadFile(serverLog)
+		t.Fatalf("-aL side did not exit after bind failure:\n%s", serverData)
+	}
+
+	// The -R side should notice the disconnect and exit cleanly.
+	clientDone := make(chan error, 1)
+	go func() { clientDone <- clientCmd.Wait() }()
+	select {
+	case err := <-clientDone:
+		if err != nil {
+			clientData, _ := os.ReadFile(clientLog)
+			t.Fatalf("-R side exited with error %v:\n%s", err, clientData)
+		}
+		clientData, _ := os.ReadFile(clientLog)
+		if !strings.Contains(string(clientData), "Remote host disconnected") {
+			t.Fatalf("-R side log missing disconnect message:\n%s", clientData)
+		}
+	case <-time.After(30 * time.Second):
+		clientCmd.Process.Kill()
+		t.Fatal("-R side did not exit after peer disconnected")
+	}
+}
+
+// TestTunnelBothSidesRequests verifies the control-stream exchange works when
+// BOTH peers have tunnel requests (no allowlist-only side). This previously
+// deadlocked until the config timeout: both sides opened a control stream and
+// read only their own.
+func TestTunnelBothSidesRequests(t *testing.T) {
+	relayAddr, cleanup := testRelay(t)
+	defer cleanup()
+
+	echoPortA := 19041
+	echoPortB := 19042
+	fwdA := 19043  // A's -L listener -> echoB
+	fwdB := 19044  // B's -L listener -> echoA
+	fwdAR := 19045 // A's -R (B listens) -> echoA
+	fwdBR := 19046 // B's -R (A listens) -> echoB
+	code := "9940-both-sides-requests"
+
+	_, echoCloseA := startEchoServer(t, fmt.Sprintf("127.0.0.1:%d", echoPortA))
+	defer echoCloseA()
+	_, echoCloseB := startEchoServer(t, fmt.Sprintf("127.0.0.1:%d", echoPortB))
+	defer echoCloseB()
+	waitForListener(t, fmt.Sprintf("127.0.0.1:%d", echoPortA), 5*time.Second)
+	waitForListener(t, fmt.Sprintf("127.0.0.1:%d", echoPortB), 5*time.Second)
+
+	logDir := t.TempDir()
+
+	// Peer A: requests -L fwdA->echoB and -R fwdAR->echoA; allowlists B's
+	// requests: B's -L targets echoA (aF) and B's -R makes A listen on fwdBR (aL).
+	aLog := filepath.Join(logDir, "a_stderr.log")
+	aLogF, _ := os.Create(aLog)
+	aArgs := []string{"tunnel"}
+	aArgs = append(aArgs, clientModeArgs(relayAddr, "--code", code,
+		"-L", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", fwdA, echoPortB),
+		"-R", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", fwdAR, echoPortA),
+		"-aF", fmt.Sprintf("127.0.0.1:%d", echoPortA),
+		"-aL", fmt.Sprintf("127.0.0.1:%d", fwdBR))...)
+	aCmd := exec.Command(qvoleBin, aArgs...)
+	aCmd.Stderr = aLogF
+	if err := aCmd.Start(); err != nil {
+		t.Fatalf("start A: %v", err)
+	}
+	defer aCmd.Process.Kill()
+	aLogF.Close()
+
+	// Peer B: requests -L fwdB->echoA and -R fwdBR->echoB; allowlists A's
+	// requests: A's -L targets echoB (aF) and A's -R makes B listen on fwdAR (aL).
+	bLog := filepath.Join(logDir, "b_stderr.log")
+	bLogF, _ := os.Create(bLog)
+	bArgs := []string{"tunnel"}
+	bArgs = append(bArgs, clientModeArgs(relayAddr, "--code", code,
+		"-L", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", fwdB, echoPortA),
+		"-R", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", fwdBR, echoPortB),
+		"-aF", fmt.Sprintf("127.0.0.1:%d", echoPortB),
+		"-aL", fmt.Sprintf("127.0.0.1:%d", fwdAR))...)
+	bCmd := exec.Command(qvoleBin, bArgs...)
+	bCmd.Stderr = bLogF
+	if err := bCmd.Start(); err != nil {
+		t.Fatalf("start B: %v", err)
+	}
+	defer bCmd.Process.Kill()
+	bLogF.Close()
+
+	waitForListener(t, fmt.Sprintf("127.0.0.1:%d", fwdA), 15*time.Second)
+	waitForListener(t, fmt.Sprintf("127.0.0.1:%d", fwdB), 15*time.Second)
+	waitForListener(t, fmt.Sprintf("127.0.0.1:%d", fwdAR), 15*time.Second)
+	waitForListener(t, fmt.Sprintf("127.0.0.1:%d", fwdBR), 15*time.Second)
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 4)
+
+	testPort := func(port int, payload string) {
+		defer wg.Done()
+		addr := fmt.Sprintf("127.0.0.1:%d", port)
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			errCh <- fmt.Errorf("port %d: %w", port, err)
+			return
+		}
+		defer conn.Close()
+
+		conn.Write([]byte(payload))
+		buf := make([]byte, 4096)
+		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		n, readErr := conn.Read(buf)
+		if n > 0 && bytes.Contains(buf[:n], []byte(payload)) {
+			return
+		}
+		errCh <- fmt.Errorf("port %d: read failed: %v (got %d bytes)", port, readErr, n)
+	}
+
+	wg.Add(4)
+	go testPort(fwdA, "test-a-l")
+	go testPort(fwdB, "test-b-l")
+	go testPort(fwdAR, "test-a-r")
+	go testPort(fwdBR, "test-b-r")
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		aData, _ := os.ReadFile(aLog)
+		bData, _ := os.ReadFile(bLog)
+		t.Errorf("%v\nA: %s\nB: %s", err, string(aData), string(bData))
 	}
 }
