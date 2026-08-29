@@ -37,7 +37,7 @@ func TestHandleTunnelStream_InvalidIndex(t *testing.T) {
 	// HandleTunnelStream should return quickly without panicking
 	done := make(chan struct{})
 	go func() {
-		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, 1, TunnelAllow{}, &sync.Map{})
+		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, 1, TunnelAllow{}, &sync.Map{}, 0)
 		close(done)
 	}()
 
@@ -73,7 +73,7 @@ func TestHandleTunnelStream_WrongDirection(t *testing.T) {
 	// Initiator has type L, so shouldDial = (spec.Type == "R") = false
 	done := make(chan struct{})
 	go func() {
-		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, 1, TunnelAllow{}, &sync.Map{})
+		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, 1, TunnelAllow{}, &sync.Map{}, 0)
 		close(done)
 	}()
 
@@ -110,7 +110,7 @@ func TestHandleTunnelStream_AllowlistRejection(t *testing.T) {
 	// --allow-forward allowlist → should reject without dialing.
 	done := make(chan struct{})
 	go func() {
-		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, 0, TunnelAllow{}, &sync.Map{})
+		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, 0, TunnelAllow{}, &sync.Map{}, 0)
 		close(done)
 	}()
 	waitDone(t, done, "rejected tunnel")
@@ -133,7 +133,7 @@ func TestHandleTunnelStream_AllowlistRejection(t *testing.T) {
 	}
 	done2 := make(chan struct{})
 	go func() {
-		HandleTunnelStream(context.Background(), acceptedStream2, reqs, 0, 0, TunnelAllow{Forward: []string{"192.0.2.1:9999"}}, &sync.Map{})
+		HandleTunnelStream(context.Background(), acceptedStream2, reqs, 0, 0, TunnelAllow{Forward: []string{"192.0.2.1:9999"}}, &sync.Map{}, 0)
 		close(done2)
 	}()
 	waitDone(t, done2, "allowlisted tunnel")
@@ -219,7 +219,7 @@ func TestHandleTunnelTCP_Success(t *testing.T) {
 
 	// Start HandleTunnelTCP on server side; it will open a QUIC stream
 	// pointing at the client conn and copy data to/from the TCP side.
-	go HandleTunnelTCP(ctx, serverConn, remote, 42)
+	go HandleTunnelTCP(ctx, serverConn, remote, 42, 0)
 
 	// Client side: accept the stream, verify header, exchange data
 	stream, err := clientConn.AcceptStream(ctx)
@@ -284,7 +284,7 @@ func TestHandleTunnelTCP_OpenStreamError(t *testing.T) {
 	cancel() // Cancelled ctx triggers immediate error on OpenStreamSync
 
 	// Should not panic, just return
-	HandleTunnelTCP(ctx, serverConn, remote, 0)
+	HandleTunnelTCP(ctx, serverConn, remote, 0, 0)
 }
 
 func TestHandleTunnelTCP_WriteHeaderError(t *testing.T) {
@@ -299,7 +299,7 @@ func TestHandleTunnelTCP_WriteHeaderError(t *testing.T) {
 
 	ctx := context.Background()
 	// Should not panic; OpenStreamSync will fail or write will fail
-	HandleTunnelTCP(ctx, serverConn, remote, 0)
+	HandleTunnelTCP(ctx, serverConn, remote, 0, 0)
 	// Clean up the client conn
 	clientConn.CloseWithError(0, "test")
 }
@@ -329,7 +329,7 @@ func TestHandleTunnelStream_DialTimeout(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, 0, TunnelAllow{}, &sync.Map{})
+		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, 0, TunnelAllow{}, &sync.Map{}, 0)
 		close(done)
 	}()
 
@@ -361,7 +361,7 @@ func TestHandleTunnelStream_ShortHeader(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, 1, TunnelAllow{}, &sync.Map{})
+		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, 1, TunnelAllow{}, &sync.Map{}, 0)
 		close(done)
 	}()
 
@@ -397,7 +397,7 @@ func TestHandleTunnelStream_PeerRType(t *testing.T) {
 	// myReqCount=0: this is a peer spec; req.Type == "R" && !myReq → return without dialing
 	done := make(chan struct{})
 	go func() {
-		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, 0, TunnelAllow{}, &sync.Map{})
+		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, 0, TunnelAllow{}, &sync.Map{}, 0)
 		close(done)
 	}()
 
@@ -422,7 +422,7 @@ func TestTunnelRunStreamAcceptor_ConnectionClosed(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	err := RunStreamAcceptor(ctx, serverConn, reqs, 0, 1, TunnelAllow{}, 200, &sync.Map{})
+	err := RunStreamAcceptor(ctx, serverConn, reqs, 0, 1, TunnelAllow{}, 200, &sync.Map{}, 0)
 	if err != nil {
 		t.Fatalf("expected nil error on peer disconnect, got %v", err)
 	}
@@ -447,8 +447,102 @@ func TestTunnelRunTCPListeners_BindFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	err = RunTCPListeners(ctx, serverConn, reqs, 0, 1, true, TunnelAllow{})
+	err = RunTCPListeners(ctx, serverConn, reqs, 0, 1, true, TunnelAllow{}, 0)
 	if err == nil {
 		t.Fatal("expected error for port already in use")
+	}
+}
+
+func TestStreamIdleTimeout_Configurable(t *testing.T) {
+	// Disabled: a forwarded tunnel stream is never force-closed, so long-running
+	// and bulk transfers are not cut off by an unexpected disconnect.
+	t.Setenv("QVOLE_STREAM_IDLE_TIMEOUT_MS", "0")
+	if got := streamIdleTimeout(); got != 0 {
+		t.Fatalf("stream idle timeout = %v, want 0 (disabled)", got)
+	}
+
+	// Enabled in milliseconds.
+	t.Setenv("QVOLE_STREAM_IDLE_TIMEOUT_MS", "300000")
+	if got := streamIdleTimeout(); got != 5*time.Minute {
+		t.Fatalf("stream idle timeout = %v, want 5m", got)
+	}
+
+	// Invalid (negative) and non-numeric values fall back to disabled.
+	t.Setenv("QVOLE_STREAM_IDLE_TIMEOUT_MS", "-100")
+	if got := streamIdleTimeout(); got != 0 {
+		t.Fatalf("negative stream idle timeout = %v, want 0", got)
+	}
+	t.Setenv("QVOLE_STREAM_IDLE_TIMEOUT_MS", "abc")
+	if got := streamIdleTimeout(); got != 0 {
+		t.Fatalf("non-numeric stream idle timeout = %v, want 0", got)
+	}
+}
+
+// TestHandleTunnelTCP_ActiveTransferNotCapped verifies that with the stream idle
+// timeout enabled, an actively transferring pipe is not torn down: the deadline
+// is refreshed on traffic, so it survives well past the configured window.
+func TestHandleTunnelTCP_ActiveTransferNotCapped(t *testing.T) {
+	clientConn, serverConn := setupQUICPair(t)
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+
+	go HandleTunnelTCP(context.Background(), serverConn, remote, 42, time.Second)
+
+	stream, err := clientConn.AcceptStream(context.Background())
+	if err != nil {
+		t.Fatalf("accept stream: %v", err)
+	}
+	defer stream.Close()
+
+	var header [2]byte
+	if _, err := io.ReadFull(stream, header[:]); err != nil {
+		t.Fatalf("read header: %v", err)
+	}
+
+	// Pump data continuously for well past the window; with a refreshed deadline
+	// the pipe must survive, whereas an absolute-cap regression would tear it down.
+	end := time.Now().Add(2500 * time.Millisecond)
+	readBuf := make([]byte, 1)
+	for time.Now().Before(end) {
+		if _, err := stream.Write([]byte("x")); err != nil {
+			t.Fatalf("write stream: %v", err)
+		}
+		local.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := local.Read(readBuf); err != nil {
+			t.Fatalf("read local: %v", err)
+		}
+	}
+}
+
+// TestHandleTunnelTCP_SilentStreamReaped verifies that when the stream idle
+// timeout is enabled, a stream that goes completely silent is reaped after the
+// window (its close is observable as a read error on the peer side).
+func TestHandleTunnelTCP_SilentStreamReaped(t *testing.T) {
+	clientConn, serverConn := setupQUICPair(t)
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+
+	go HandleTunnelTCP(context.Background(), serverConn, remote, 42, 300*time.Millisecond)
+
+	stream, err := clientConn.AcceptStream(context.Background())
+	if err != nil {
+		t.Fatalf("accept stream: %v", err)
+	}
+	defer stream.Close()
+
+	var header [2]byte
+	if _, err := io.ReadFull(stream, header[:]); err != nil {
+		t.Fatalf("read header: %v", err)
+	}
+
+	// No data after the header: the tunnel side must reap the silent stream
+	// after the idle window, so a subsequent read returns an error.
+	time.Sleep(1200 * time.Millisecond)
+	stream.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var b [1]byte
+	if _, err := stream.Read(b[:]); err == nil {
+		t.Fatal("expected silent stream to be reaped (closed) after the idle window")
 	}
 }

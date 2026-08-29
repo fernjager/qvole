@@ -539,7 +539,7 @@ WantedBy=multi-user.target
 |----------|---------|-------------|
 | `QVOLE_CODE` | - | Código de conexión (alternativa a `--code`) |
 | `QVOLE_KDF_ITERATIONS` | 600000 | Iteraciones PBKDF2 para la derivación código-a-escalar |
-| `QVOLE_KEEPALIVE_MS` | 2000 | Intervalo de keepalive de QUIC |
+| `QVOLE_KEEPALIVE_MS` | 5000 | Intervalo de keepalive de QUIC |
 | `QVOLE_IDLE_TIMEOUT_MS` | 120000 | Tiempo de inactividad de QUIC antes de desconectar |
 | `QVOLE_HANDSHAKE_TIMEOUT_MS` | 30000 | Tiempo de espera del handshake |
 | `QVOLE_MAX_STREAMS` | 100 | Máximo de flujos QUIC concurrentes |
@@ -551,6 +551,7 @@ WantedBy=multi-user.target
 | `QVOLE_EXCHANGE_READ_DEADLINE_MS` | 1000 | Intervalo de sondeo de lectura del relay |
 | `QVOLE_REG_INTERVAL_MS` | 30000 | Intervalo de registro en el relay |
 | `QVOLE_DIAL_TIMEOUT_MS` | 10000 | Tiempo de espera de dial TCP del túnel |
+| `QVOLE_STREAM_IDLE_TIMEOUT_MS` | 0 | Ventana de inactividad antes de reclamar un flujo de túnel silencioso (0 lo desactiva; se refresca con el tráfico, por lo que las transferencias activas nunca se cortan) |
 | `QVOLE_EXEC_DRAIN_TIMEOUT_MS` | 5000 | Tiempo de espera de drenaje de exec tras la salida del comando |
 | `QVOLE_INITIAL_STREAM_WINDOW` | 1048576 | Ventana de recepción de flujo QUIC |
 | `QVOLE_INITIAL_CONNECTION_WINDOW` | 4194304 | Ventana de recepción de conexión QUIC |

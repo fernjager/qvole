@@ -40,6 +40,39 @@ func TestBidirectionalCopy_TransfersBothDirections(t *testing.T) {
 	}
 }
 
+func TestRefreshReader_InvokesOnReadOnDataOnly(t *testing.T) {
+	calls := 0
+	rr := &refreshReader{r: strings.NewReader("abc"), onRead: func() { calls++ }}
+	buf := make([]byte, 8)
+
+	n, err := rr.Read(buf)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("read %d bytes, want 3", n)
+	}
+	if calls != 1 {
+		t.Fatalf("onRead calls = %d, want 1 (after data)", calls)
+	}
+
+	n, err = rr.Read(buf)
+	if n != 0 || err != io.EOF {
+		t.Fatalf("expected EOF, got n=%d err=%v", n, err)
+	}
+	if calls != 1 {
+		t.Fatalf("onRead calls = %d, want 1 (no call when no data)", calls)
+	}
+}
+
+func TestRefreshReader_NilOnRead(t *testing.T) {
+	rr := &refreshReader{r: strings.NewReader("x")}
+	buf := make([]byte, 8)
+	if _, err := rr.Read(buf); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+}
+
 type closerPair struct {
 	io.Reader
 	io.Writer

@@ -16,8 +16,8 @@ func TestDefaultOptions(t *testing.T) {
 	if o.exchangeDeadline != 5*time.Minute {
 		t.Errorf("exchangeDeadline = %v, want 5min", o.exchangeDeadline)
 	}
-	if o.keepAlivePeriod != 2*time.Second {
-		t.Errorf("keepAlivePeriod = %v, want 2s", o.keepAlivePeriod)
+	if o.keepAlivePeriod != 5*time.Second {
+		t.Errorf("keepAlivePeriod = %v, want 5s", o.keepAlivePeriod)
 	}
 	if o.idleTimeout != 2*time.Minute {
 		t.Errorf("idleTimeout = %v, want 2min", o.idleTimeout)
@@ -30,6 +30,9 @@ func TestDefaultOptions(t *testing.T) {
 	}
 	if o.forwardMaxStreams != 200 {
 		t.Errorf("forwardMaxStreams = %d, want 200", o.forwardMaxStreams)
+	}
+	if o.streamIdleTimeout != 0 {
+		t.Errorf("streamIdleTimeout = %v, want 0 (disabled)", o.streamIdleTimeout)
 	}
 }
 
@@ -125,6 +128,19 @@ func TestValidate_MissingRelay(t *testing.T) {
 	o := resolveOptions([]Option{WithCode("12345678")})
 	if err := validate(o); err == nil {
 		t.Fatal("expected error for missing relay")
+	}
+}
+
+func TestWithStreamIdleTimeout(t *testing.T) {
+	o := defaultOptions()
+	WithStreamIdleTimeout(5 * time.Minute)(o)
+	if o.streamIdleTimeout != 5*time.Minute {
+		t.Errorf("streamIdleTimeout = %v, want 5min", o.streamIdleTimeout)
+	}
+	// A zero value disables the per-stream cap (the default).
+	WithStreamIdleTimeout(0)(o)
+	if o.streamIdleTimeout != 0 {
+		t.Errorf("streamIdleTimeout = %v, want 0 after reset", o.streamIdleTimeout)
 	}
 }
 

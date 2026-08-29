@@ -14,7 +14,6 @@ const (
 	maxTunnelRequests   = 100
 	streamHeaderTimeout = 15 * time.Second
 	streamConfigTimeout = 30 * time.Second
-	streamIdleTimeout   = 5 * time.Minute
 )
 
 // TunnelRequest represents a single port-forwarding tunnel specification.

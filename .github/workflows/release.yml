@@ -54,6 +54,10 @@ jobs:
           path: artifacts
           merge-multiple: true
       - run: ls -lh artifacts/
+      - name: Generate SHA256SUMS
+        run: |
+          (cd artifacts && sha256sum * > SHA256SUMS)
+          cat artifacts/SHA256SUMS
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:

@@ -528,7 +528,7 @@ WantedBy=multi-user.target
 |----------|---------|-------------|
 | `QVOLE_CODE` | - | 连接代码（`--code` 的替代方式） |
 | `QVOLE_KDF_ITERATIONS` | 600000 | 代码到标量推导的 PBKDF2 迭代次数 |
-| `QVOLE_KEEPALIVE_MS` | 2000 | QUIC 保活间隔 |
+| `QVOLE_KEEPALIVE_MS` | 5000 | QUIC 保活间隔 |
 | `QVOLE_IDLE_TIMEOUT_MS` | 120000 | 断开前的 QUIC 空闲超时 |
 | `QVOLE_HANDSHAKE_TIMEOUT_MS` | 30000 | 握手超时 |
 | `QVOLE_MAX_STREAMS` | 100 | 最大并发 QUIC 流数 |
@@ -540,6 +540,7 @@ WantedBy=multi-user.target
 | `QVOLE_EXCHANGE_READ_DEADLINE_MS` | 1000 | 中继读取轮询间隔 |
 | `QVOLE_REG_INTERVAL_MS` | 30000 | 中继注册间隔 |
 | `QVOLE_DIAL_TIMEOUT_MS` | 10000 | 隧道 TCP 拨号超时 |
+| `QVOLE_STREAM_IDLE_TIMEOUT_MS` | 0 | 静默转发流被回收前的空闲窗口（0 表示禁用；按流量刷新，因此活跃传输不会被截断） |
 | `QVOLE_EXEC_DRAIN_TIMEOUT_MS` | 5000 | 命令退出后的 exec 排空超时 |
 | `QVOLE_INITIAL_STREAM_WINDOW` | 1048576 | QUIC 流接收窗口 |
 | `QVOLE_INITIAL_CONNECTION_WINDOW` | 4194304 | QUIC 连接接收窗口 |

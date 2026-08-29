@@ -581,6 +581,15 @@ lets the peer reach any `host:8081` through this machine, including internal
 services and cloud metadata endpoints the operator may not intend to expose.
 Prefer explicit hosts (`127.0.0.1:8081`) unless the wildcard is deliberate.
 
+**Forward-target resolution and pinning:** for peer `-L` requests, this side
+resolves the target address once and dials only the IP literal(s) permitted by
+the `-aF` allowlist (see `TunnelAllow.ForwardIPs`). Closing the DNS-rebinding and
+host-alias window means the allowlist check and the connect use the same resolved
+address, and `localhost` vs `127.0.0.1` are matched by address rather than by
+literal spelling. Hostnames in `-aF` are resolved once at startup; an entry that
+fails to resolve simply never matches, so the tunnel fails closed rather than
+over-permitting. The `-aL`/listen path keeps its textual bind-address matching.
+
 #### Control Stream Exchange
 
 The client side opens the control stream and the server side accepts it. Each
@@ -1091,7 +1100,7 @@ a cosmetic limitation, not a security concern.
 | Relay DoS disrupts rendezvous | High | Denial of service (no confidentiality loss) | Retry with different relay (out of band) |
 | Hole punch spoofing on shared L2 network | Low-Medium | Denial of service (IP-only port matching, first-packet-wins race); no data compromise | TLS fingerprint pinning; reconnect with new code |
 | Forward listener binds to 0.0.0.0 unintentionally | Low | Local privilege escalation | 3-part `-L lport:raddr:rport` defaults the listen address to 127.0.0.1; 4-part `-L :lport:raddr:rport` (empty listen host) also defaults to 127.0.0.1; explicit `0.0.0.0` still binds all interfaces |
-| Peer requests access to internal services | Low (code-authenticated peer) | Exposure of non-allowlisted local services or listener ports | Per-request `-aL`/`-aF` allowlist; nothing accepted by default; `-a` (allow all) is explicit and not safe. Note: empty-host entries like `:8081` match any host on that port |
+| Peer requests access to internal services | Low (code-authenticated peer) | Exposure of non-allowlisted local services or listener ports | Per-request `-aL`/`-aF` allowlist; nothing accepted by default; `-a` (allow all) is explicit and not safe. Peer `-L` forward targets are resolved once and pinned to allowlisted IP literals (DNS-rebinding resistant). Note: empty-host entries like `:8081` match any host on that port, including internal and cloud-metadata endpoints |
 | Cryptographic break of P-256, SHA-256, or TLS 1.3 | Negligible | Full compromise | Standard model; common to all TLS-based systems |
 | Post-quantum adversary | Futuristic | Full compromise | No quantum-resistant primitives; code is not PQ-secure |
 

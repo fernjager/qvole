@@ -23,11 +23,18 @@ import (
 // allowForward (-aF) allowlist which peer tunnel requests are honored
 // (see TunnelAllow). An empty allowlist accepts nothing.
 // forwardMaxStreams overrides QVOLE_FORWARD_MAX_STREAMS; 0 means use env/default.
-func RunTunnel(ctx context.Context, relayAddr, code string, localTunnels, remoteTunnels []string, allowAll bool, allowListen, allowForward []string, forwardMaxStreams int) error {
+// streamIdleTimeoutOverride overrides QVOLE_STREAM_IDLE_TIMEOUT_MS; 0 means use
+// env/default (which is 0, i.e. no per-stream cap).
+func RunTunnel(ctx context.Context, relayAddr, code string, localTunnels, remoteTunnels []string, allowAll bool, allowListen, allowForward []string, forwardMaxStreams int, streamIdleTimeoutOverride time.Duration) error {
 	allow := TunnelAllow{All: allowAll, Listen: allowListen, Forward: allowForward}
 	if err := allow.Validate(); err != nil {
 		return err
 	}
+	// Resolve -aF hostnames once so the dial path can pin to allowed IPs
+	// (closing the DNS-rebinding window) without re-resolving per connection.
+	allow.Resolve()
+
+	idle := streamIdleTimeout(streamIdleTimeoutOverride)
 
 	conn, isServer, err := engine.ConnectPeer(ctx, relayAddr, code)
 	if err != nil {
@@ -114,7 +121,7 @@ func RunTunnel(ctx context.Context, relayAddr, code string, localTunnels, remote
 			cancel()
 			wg.Done()
 		}()
-		acceptorErr = RunStreamAcceptor(ctx, conn, reqs, myReqStart, myReqCount, allow, fms, announced)
+		acceptorErr = RunStreamAcceptor(ctx, conn, reqs, myReqStart, myReqCount, allow, fms, announced, idle)
 	}()
 
 	wg.Add(1)
@@ -123,7 +130,7 @@ func RunTunnel(ctx context.Context, relayAddr, code string, localTunnels, remote
 			cancel()
 			wg.Done()
 		}()
-		listenerErr = RunTCPListeners(ctx, conn, reqs, myReqStart, myReqCount, peerAccept, allow)
+		listenerErr = RunTCPListeners(ctx, conn, reqs, myReqStart, myReqCount, peerAccept, allow, idle)
 	}()
 
 	wg.Wait()
@@ -271,7 +278,7 @@ func writeTunnelConfig(w io.Writer, allow bool, reqs []TunnelRequest) error {
 // bounded by forwardMaxStreams. myReqStart/myReqCount describe the index range
 // of this side's requests within reqs (see ExchangeTunnelConfig); announced is
 // the per-session announcement map (see announceTunnelOnce).
-func RunStreamAcceptor(ctx context.Context, conn *quic.Conn, reqs []TunnelRequest, myReqStart, myReqCount int, allow TunnelAllow, forwardMaxStreams int, announced *sync.Map) error {
+func RunStreamAcceptor(ctx context.Context, conn *quic.Conn, reqs []TunnelRequest, myReqStart, myReqCount int, allow TunnelAllow, forwardMaxStreams int, announced *sync.Map, idle time.Duration) error {
 	guard := make(chan struct{}, forwardMaxStreams)
 	for {
 		stream, err := conn.AcceptStream(ctx)
@@ -287,7 +294,7 @@ func RunStreamAcceptor(ctx context.Context, conn *quic.Conn, reqs []TunnelReques
 		guard <- struct{}{}
 		go func(s *quic.Stream) {
 			defer func() { <-guard }()
-			HandleTunnelStream(ctx, s, reqs, myReqStart, myReqCount, allow, announced)
+			HandleTunnelStream(ctx, s, reqs, myReqStart, myReqCount, allow, announced, idle)
 		}(stream)
 	}
 }
@@ -297,7 +304,7 @@ func RunStreamAcceptor(ctx context.Context, conn *quic.Conn, reqs []TunnelReques
 // Peer -R requests are honored only when their listen address matches an -aL
 // allowlist entry (or -a is set). myReqStart/myReqCount describe the index range
 // of this side's requests within reqs (see ExchangeTunnelConfig).
-func RunTCPListeners(ctx context.Context, conn *quic.Conn, reqs []TunnelRequest, myReqStart, myReqCount int, peerAccept bool, allow TunnelAllow) error {
+func RunTCPListeners(ctx context.Context, conn *quic.Conn, reqs []TunnelRequest, myReqStart, myReqCount int, peerAccept bool, allow TunnelAllow, idle time.Duration) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -350,7 +357,7 @@ func RunTCPListeners(ctx context.Context, conn *quic.Conn, reqs []TunnelRequest,
 					return
 				}
 				util.LogTunnel.Printf("New connection on %s", s.ListenAddr)
-				go HandleTunnelTCP(ctx, conn, tcpConn, idx)
+				go HandleTunnelTCP(ctx, conn, tcpConn, idx, idle)
 			}
 		}()
 	}
@@ -397,9 +404,46 @@ func announceTunnelOnce(announced *sync.Map, idx int, target string) bool {
 	return first
 }
 
+// streamIdleTimeout returns the per-tunneled-connection inactivity window used to
+// reap silent forwarded streams. It defaults to 0 (disabled): with 0, forwarded
+// connections rely purely on the connection-level QUIC keepalive/idle timeouts
+// and are never force-closed, so long-running or bulk transfers are not cut off
+// by an unexpected disconnect. When > 0, the timeout is refreshed on data flowing
+// in either direction, so only genuinely silent streams are reaped after the
+// window (an active stream is never closed just because it has been open a while).
+// It is configurable via QVOLE_STREAM_IDLE_TIMEOUT_MS; a non-zero override
+// (e.g. from WithStreamIdleTimeout) takes precedence over the env var.
+func streamIdleTimeout(override ...time.Duration) time.Duration {
+	if len(override) > 0 && override[0] > 0 {
+		return override[0]
+	}
+	return util.EnvDuration("QVOLE_STREAM_IDLE_TIMEOUT_MS", 0)
+}
+
+// tunnelCopy bridges a tunneled TCP connection and its QUIC stream. When idle
+// is > 0 it arms initial read deadlines on both sides and refreshes them
+// whenever either side produces data, turning an absolute lifetime cap into an
+// activity-based reaper. When idle is 0 (default, disabled) no per-stream
+// deadline is applied and the copy runs indefinitely, relying on connection-
+// level QUIC keepalive/idle timeouts for liveness.
+func tunnelCopy(tcpConn net.Conn, stream *quic.Stream, idle time.Duration) {
+	if idle <= 0 {
+		bidirectionalCopy(tcpConn, stream)
+		return
+	}
+	nd := time.Now().Add(idle)
+	tcpConn.SetReadDeadline(nd)
+	stream.SetReadDeadline(nd)
+	bidirectionalCopy(tcpConn, stream, func() {
+		nd := time.Now().Add(idle)
+		tcpConn.SetReadDeadline(nd)
+		stream.SetReadDeadline(nd)
+	})
+}
+
 // HandleTunnelTCP opens a QUIC stream for a local TCP connection, writing a 2-byte
 // header with the tunnel spec index before bridging data.
-func HandleTunnelTCP(ctx context.Context, conn *quic.Conn, tcpConn net.Conn, specIdx int) {
+func HandleTunnelTCP(ctx context.Context, conn *quic.Conn, tcpConn net.Conn, specIdx int, idle time.Duration) {
 	defer tcpConn.Close()
 
 	if specIdx > 65535 {
@@ -429,8 +473,7 @@ func HandleTunnelTCP(ctx context.Context, conn *quic.Conn, tcpConn net.Conn, spe
 		return
 	}
 
-	tcpConn.SetReadDeadline(time.Now().Add(streamIdleTimeout))
-	bidirectionalCopy(tcpConn, stream)
+	tunnelCopy(tcpConn, stream, idle)
 	stream.Close()
 }
 
@@ -439,7 +482,7 @@ func HandleTunnelTCP(ctx context.Context, conn *quic.Conn, tcpConn net.Conn, spe
 // describe the index range of this side's requests within reqs (see
 // ExchangeTunnelConfig); announced is the per-session announcement map (see
 // announceTunnelOnce).
-func HandleTunnelStream(ctx context.Context, stream *quic.Stream, reqs []TunnelRequest, myReqStart, myReqCount int, allow TunnelAllow, announced *sync.Map) {
+func HandleTunnelStream(ctx context.Context, stream *quic.Stream, reqs []TunnelRequest, myReqStart, myReqCount int, allow TunnelAllow, announced *sync.Map, idle time.Duration) {
 	defer stream.Close()
 
 	stream.SetReadDeadline(time.Now().Add(streamHeaderTimeout))
@@ -467,16 +510,33 @@ func HandleTunnelStream(ctx context.Context, stream *quic.Stream, reqs []TunnelR
 
 	// Allowlist check: peer-initiated tunnels are honored only when the target
 	// matches an -aF entry (or -a is set). Peer -R requests returned earlier,
-	// so only peer -L requests reach this point.
-	if !myReq && !allow.AllowsForward(req.TargetAddr) {
-		util.LogTunnel.PrintfWarn("Tunnel rejected: %s -> %s (add -aF %s to allow)", req.ListenAddr, req.TargetAddr, req.TargetAddr)
-		return
-	}
-
+	// so only peer -L requests reach this point. The target is resolved once and
+	// we dial only the allowed IP literal(s), so the allowlist check and the
+	// connect use the same address and a DNS-rebinding / host-alias spoof cannot
+	// reach an unintended target.
 	dialTimeoutVal := util.EnvDuration("QVOLE_DIAL_TIMEOUT_MS", dialTimeout)
 	d := net.Dialer{Timeout: dialTimeoutVal}
-	tcpConn, err := d.DialContext(ctx, "tcp", req.TargetAddr)
-	if err != nil {
+
+	var tcpConn net.Conn
+	var err error
+	if myReq {
+		// My own -R request: the peer connects to the address I declared and I
+		// dial the target on my side. No allowlist applies to my own target.
+		tcpConn, err = d.DialContext(ctx, "tcp", req.TargetAddr)
+	} else {
+		ips, port, ok := allow.ForwardIPs(ctx, req.TargetAddr)
+		if !ok {
+			util.LogTunnel.PrintfWarn("Tunnel rejected: %s -> %s (add -aF %s to allow)", req.ListenAddr, req.TargetAddr, req.TargetAddr)
+			return
+		}
+		for _, ip := range ips {
+			tcpConn, err = d.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), port))
+			if err == nil {
+				break
+			}
+		}
+	}
+	if tcpConn == nil {
 		util.LogTunnel.PrintfError("Connecting to %s for tunnel %d failed: %v", util.Bold(req.TargetAddr), idx, err)
 		return
 	}
@@ -487,11 +547,10 @@ func HandleTunnelStream(ctx context.Context, stream *quic.Stream, reqs []TunnelR
 	announceTunnelOnce(announced, int(idx), req.TargetAddr)
 	util.LogTunnel.Printf("Tunnel %d connection: ↔ %s", idx, util.Bold(req.TargetAddr))
 
-	// Set an absolute 5-minute lifetime cap on the QUIC stream so a peer
-	// that goes silent cannot hold the connection open indefinitely.
-	// Note: this is not a refreshing idle deadline; active streams also
-	// hit this limit.
-	stream.SetReadDeadline(time.Now().Add(streamIdleTimeout))
-	tcpConn.SetReadDeadline(time.Now().Add(streamIdleTimeout))
-	bidirectionalCopy(tcpConn, stream)
+	// Bridge the TCP connection and QUIC stream. When idle > 0 it is refreshed
+	// on activity so only silent streams are reaped; when 0 (default) the
+	// forwarded connection relies on the connection-level QUIC keepalive/idle
+	// timeouts and is never force-closed, so long-running or bulk transfers are
+	// not cut off unexpectedly.
+	tunnelCopy(tcpConn, stream, idle)
 }

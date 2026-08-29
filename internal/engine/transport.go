@@ -16,7 +16,7 @@ import (
 
 const (
 	ProtocolVersion                       = "0.1"
-	defaultKeepAlivePeriod                = 2 * time.Second
+	defaultKeepAlivePeriod                = 5 * time.Second
 	defaultMaxIdleTimeout                 = 2 * time.Minute
 	defaultHandshakeIdleTimeout           = 30 * time.Second
 	defaultMaxIncomingStreams             = 100

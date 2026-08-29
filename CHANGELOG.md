@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-08-29
+
+### Security
+- Peer forward targets are resolved once and dialed only to allowlisted IP literals, closing the DNS-rebinding and host-alias window.
+
+### Changed
+- Forwarded tunnel streams are no longer force-closed by an absolute 5-minute cap.
+- Default QUIC keepalive interval raised from 2s to 5s (`QVOLE_KEEPALIVE_MS` / `WithKeepAlive`).
+
+### Added
+- `install.sh` verifies the download's SHA-256 against the release `SHA256SUMS` before installing.
+
 ## [0.2.0] - 2026-08-23
 
 ### Security

@@ -539,7 +539,7 @@ WantedBy=multi-user.target
 |----------|---------|-------------|
 | `QVOLE_CODE` | - | Код подключения (альтернатива `--code`) |
 | `QVOLE_KDF_ITERATIONS` | 600000 | Итераций PBKDF2 для вывода скаляра из кода |
-| `QVOLE_KEEPALIVE_MS` | 2000 | Интервал keepalive QUIC |
+| `QVOLE_KEEPALIVE_MS` | 5000 | Интервал keepalive QUIC |
 | `QVOLE_IDLE_TIMEOUT_MS` | 120000 | Тайм-аут бездействия QUIC перед отключением |
 | `QVOLE_HANDSHAKE_TIMEOUT_MS` | 30000 | Тайм-аут рукопожатия |
 | `QVOLE_MAX_STREAMS` | 100 | Максимум одновременных QUIC-потоков |
@@ -551,6 +551,7 @@ WantedBy=multi-user.target
 | `QVOLE_EXCHANGE_READ_DEADLINE_MS` | 1000 | Интервал опроса чтения с relay |
 | `QVOLE_REG_INTERVAL_MS` | 30000 | Интервал регистрации на relay |
 | `QVOLE_DIAL_TIMEOUT_MS` | 10000 | Тайм-аут TCP-подключения туннеля |
+| `QVOLE_STREAM_IDLE_TIMEOUT_MS` | 0 | Окно неактивности перед закрытием молчащего туннельного потока (0 - отключено; обновляется при трафике, поэтому активные передачи не обрываются) |
 | `QVOLE_EXEC_DRAIN_TIMEOUT_MS` | 5000 | Тайм-аут завершения exec после выхода команды |
 | `QVOLE_INITIAL_STREAM_WINDOW` | 1048576 | Окно приёма QUIC-потока |
 | `QVOLE_INITIAL_CONNECTION_WINDOW` | 4194304 | Окно приёма QUIC-соединения |

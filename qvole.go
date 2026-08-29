@@ -158,7 +158,7 @@ func Tunnel(ctx context.Context, opts ...Option) error {
 		return err
 	}
 	cfg := toPeerConfig(o)
-	return app.RunTunnel(ctx, o.relay, o.code, o.localTunnels, o.remoteTunnels, o.allowAll, o.allowListen, o.allowForward, cfg.ForwardMaxStreams)
+	return app.RunTunnel(ctx, o.relay, o.code, o.localTunnels, o.remoteTunnels, o.allowAll, o.allowListen, o.allowForward, cfg.ForwardMaxStreams, o.streamIdleTimeout)
 }
 
 // TunnelRequest represents a single port-forwarding tunnel specification.

@@ -15,6 +15,7 @@ type options struct {
 	handshakeTimeout  time.Duration
 	maxStreams        int
 	forwardMaxStreams int
+	streamIdleTimeout time.Duration
 	command           string
 	cmdMode           bool
 	localTunnels      []string
@@ -29,7 +30,7 @@ func defaultOptions() *options {
 		relay:             "",
 		punchTimeout:      10 * time.Second,
 		exchangeDeadline:  5 * time.Minute,
-		keepAlivePeriod:   2 * time.Second,
+		keepAlivePeriod:   5 * time.Second,
 		idleTimeout:       2 * time.Minute,
 		handshakeTimeout:  30 * time.Second,
 		maxStreams:        100,
@@ -82,6 +83,16 @@ func WithMaxStreams(n int) Option {
 // streams that tunnel forwarding is allowed to open.
 func WithForwardMaxStreams(n int) Option {
 	return func(o *options) { o.forwardMaxStreams = n }
+}
+
+// WithStreamIdleTimeout sets the inactivity window before a silent forwarded
+// tunnel stream is reaped. A value of 0 disables the per-stream cap (the
+// default), so forwarded connections rely on the connection-level QUIC
+// keepalive/idle timeouts and are never force-closed. When > 0 the deadline is
+// refreshed on data flowing in either direction, so only genuinely silent
+// streams are reaped. Overrides the QVOLE_STREAM_IDLE_TIMEOUT_MS env var.
+func WithStreamIdleTimeout(d time.Duration) Option {
+	return func(o *options) { o.streamIdleTimeout = d }
 }
 
 // WithCommand sets the command to run in exec mode.

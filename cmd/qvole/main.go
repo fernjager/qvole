@@ -23,7 +23,7 @@ const (
 	defaultListenAddr = ":9009"
 )
 
-var version = "0.2.0"
+var version = "0.2.1"
 var debug bool
 
 func main() {
@@ -324,7 +324,7 @@ func runTunnel(args []string) {
 	ctx, cancel := signalContext()
 	defer cancel()
 
-	maybeFatal(util.LogTunnel, app.RunTunnel(ctx, relayAddr, finalCode, localTunnels, remoteTunnels, *allowAll, allowListen, allowForward, 0))
+	maybeFatal(util.LogTunnel, app.RunTunnel(ctx, relayAddr, finalCode, localTunnels, remoteTunnels, *allowAll, allowListen, allowForward, 0, 0))
 }
 
 func printUsage() {

@@ -30,8 +30,8 @@ func isClosedError(err error) bool {
 }
 
 // isTimeoutError reports whether err is a benign deadline or timeout error,
-// which occurs when a tunnel connection hits its absolute lifetime cap and the
-// copy deadlines expire. The tunnel itself remains healthy.
+// which occurs when a tunnel connection hits its stream inactivity window and
+// the copy deadlines expire. The tunnel itself remains healthy.
 func isTimeoutError(err error) bool {
 	var ne net.Error
 	return errors.As(err, &ne) && ne.Timeout()
@@ -44,7 +44,7 @@ func isTimeoutError(err error) bool {
 //   - peer disconnect (non-zero application error, idle timeout, stateless
 //     reset, transport error) → "disconnect", logged at debug level;
 //   - plain local close races (net.ErrClosed / io.ErrClosedPipe) → "";
-//   - deadline/timeout errors (tunnel lifetime cap) → "timeout";
+//   - deadline/timeout errors (tunnel inactivity window) → "timeout";
 //   - everything else → "error".
 func copyErrorKind(err error) string {
 	if err == nil {
@@ -66,9 +66,30 @@ func copyErrorKind(err error) string {
 	return "error"
 }
 
+// refreshReader wraps a reader and invokes onRead after each read that returned
+// data, so a caller can refresh an inactivity watchdog/deadline on real traffic
+// rather than on wall-clock time.
+type refreshReader struct {
+	r      io.Reader
+	onRead func()
+}
+
+func (rr *refreshReader) Read(p []byte) (int, error) {
+	n, err := rr.r.Read(p)
+	if n > 0 && rr.onRead != nil {
+		rr.onRead()
+	}
+	return n, err
+}
+
 // copyDirection copies src to dst, treating benign close and timeout errors as
 // expected teardown (logged only at debug level) and everything else as an error.
-func copyDirection(dst, src io.ReadWriter, dir string) {
+// When a non-nil refresh function is passed, it runs after each read that yields
+// data, letting the caller keep an activity-based deadline refreshed on traffic.
+func copyDirection(dst io.Writer, src io.Reader, dir string, refresh ...func()) {
+	if len(refresh) > 0 && refresh[0] != nil {
+		src = &refreshReader{r: src, onRead: refresh[0]}
+	}
 	buf := engine.BufferPool.Get().([]byte)
 	defer engine.PutBuffer(buf)
 	if _, err := io.CopyBuffer(dst, src, buf); err != nil {
@@ -83,7 +104,10 @@ func copyDirection(dst, src io.ReadWriter, dir string) {
 	}
 }
 
-func bidirectionalCopy(a, b io.ReadWriter) {
+// bidirectionalCopy copies data both ways between a and b until either side
+// closes or errors. An optional refresh function is invoked whenever either
+// direction reads data, so callers can implement aggregate inactivity tracking.
+func bidirectionalCopy(a, b io.ReadWriter, refresh ...func()) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
@@ -99,15 +123,20 @@ func bidirectionalCopy(a, b io.ReadWriter) {
 		})
 	}
 
+	var rf func()
+	if len(refresh) > 0 {
+		rf = refresh[0]
+	}
+
 	go func() {
 		defer wg.Done()
-		copyDirection(a, b, "a←b")
+		copyDirection(a, b, "a←b", rf)
 		closeBoth()
 	}()
 
 	go func() {
 		defer wg.Done()
-		copyDirection(b, a, "b←a")
+		copyDirection(b, a, "b←a", rf)
 		closeBoth()
 	}()
 

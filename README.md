@@ -67,6 +67,11 @@ relay$ qvole relay --listen :9009
 curl -fsSL https://get.qvole.dev | sh
 ```
 
+The installer fetches the binary over HTTPS and, for releases that publish a
+`SHA256SUMS` file (newer releases), verifies the download's SHA-256 against it
+before installing. A checksum mismatch aborts the install; older releases that
+predate the checksum file install with a warning.
+
 **From source:**
 
 ```bash
@@ -539,7 +544,7 @@ WantedBy=multi-user.target
 |----------|---------|-------------|
 | `QVOLE_CODE` | - | Connection code (alternative to `--code`) |
 | `QVOLE_KDF_ITERATIONS` | 600000 | PBKDF2 iterations for code-to-scalar derivation |
-| `QVOLE_KEEPALIVE_MS` | 2000 | QUIC keepalive interval |
+| `QVOLE_KEEPALIVE_MS` | 5000 | QUIC keepalive interval |
 | `QVOLE_IDLE_TIMEOUT_MS` | 120000 | QUIC idle timeout before disconnect |
 | `QVOLE_HANDSHAKE_TIMEOUT_MS` | 30000 | Handshake timeout |
 | `QVOLE_MAX_STREAMS` | 100 | Max concurrent QUIC streams |
@@ -551,6 +556,7 @@ WantedBy=multi-user.target
 | `QVOLE_EXCHANGE_READ_DEADLINE_MS` | 1000 | Relay read poll interval |
 | `QVOLE_REG_INTERVAL_MS` | 30000 | Relay registration interval |
 | `QVOLE_DIAL_TIMEOUT_MS` | 10000 | Tunnel TCP dial timeout |
+| `QVOLE_STREAM_IDLE_TIMEOUT_MS` | 0 | Inactivity window before a silent forwarded tunnel stream is reaped (0 disables) |
 | `QVOLE_EXEC_DRAIN_TIMEOUT_MS` | 5000 | Exec drain timeout after command exit |
 | `QVOLE_INITIAL_STREAM_WINDOW` | 1048576 | QUIC stream receive window |
 | `QVOLE_INITIAL_CONNECTION_WINDOW` | 4194304 | QUIC connection receive window |

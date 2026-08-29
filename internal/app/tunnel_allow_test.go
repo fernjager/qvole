@@ -1,6 +1,8 @@
 package app
 
 import (
+	"context"
+	"net"
 	"strings"
 	"testing"
 )
@@ -112,5 +114,61 @@ func TestTunnelAllow_AllowsForward(t *testing.T) {
 	}
 	if !((TunnelAllow{All: true}).AllowsForward("10.0.0.5:22")) {
 		t.Error("All must allow any forward target")
+	}
+}
+
+func TestTunnelAllow_ForwardIPs(t *testing.T) {
+	// IP-literal allowlist: exact match allowed; wrong host or port rejected.
+	a := TunnelAllow{Forward: []string{"192.0.2.5:8080"}}
+	ips, port, ok := a.ForwardIPs(context.Background(), "192.0.2.5:8080")
+	if !ok || port != "8080" || len(ips) != 1 || !ips[0].Equal(net.ParseIP("192.0.2.5")) {
+		t.Errorf("ForwardIPs exact match = ok:%v port:%q ips:%v, want 1 allowed ip 192.0.2.5:8080", ok, port, ips)
+	}
+	if _, _, ok := a.ForwardIPs(context.Background(), "192.0.2.6:8080"); ok {
+		t.Error("ForwardIPs must reject a target host not in the allowlist")
+	}
+	if _, _, ok := a.ForwardIPs(context.Background(), "192.0.2.5:8081"); ok {
+		t.Error("ForwardIPs must reject a target port not in the allowlist")
+	}
+
+	// Empty allowlist accepts nothing.
+	if _, _, ok := (TunnelAllow{}).ForwardIPs(context.Background(), "192.0.2.5:8080"); ok {
+		t.Error("empty allowlist must not allow any forward target")
+	}
+}
+
+func TestTunnelAllow_ForwardIPs_WildcardAndAll(t *testing.T) {
+	wc := TunnelAllow{Forward: []string{":8080"}}
+	if _, _, ok := wc.ForwardIPs(context.Background(), "192.0.2.9:8080"); !ok {
+		t.Error("wildcard :port should allow any host on that port")
+	}
+	if _, _, ok := wc.ForwardIPs(context.Background(), "192.0.2.9:8081"); ok {
+		t.Error("wildcard :port must reject other ports")
+	}
+	if _, _, ok := (TunnelAllow{All: true}).ForwardIPs(context.Background(), "8.8.8.8:53"); !ok {
+		t.Error("All must allow any forward target")
+	}
+}
+
+func TestTunnelAllow_Resolve_Alias(t *testing.T) {
+	// After Resolve(), a 127.0.0.1 rule matches a target spelled as localhost,
+	// because ForwardIPs resolves both sides to an IP before matching.
+	a := TunnelAllow{Forward: []string{"127.0.0.1:8080"}}
+	a.Resolve()
+	ips, port, ok := a.ForwardIPs(context.Background(), "localhost:8080")
+	if !ok {
+		t.Skip("localhost did not resolve to a loopback address in this environment")
+	}
+	if port != "8080" {
+		t.Errorf("alias port = %q, want 8080", port)
+	}
+	found127 := false
+	for _, ip := range ips {
+		if ip.Equal(net.ParseIP("127.0.0.1")) {
+			found127 = true
+		}
+	}
+	if !found127 {
+		t.Errorf("alias allowed IPs = %v, want to include 127.0.0.1", ips)
 	}
 }

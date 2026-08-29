@@ -47,23 +47,61 @@ case "$ARCH" in
   *) echo "Unsupported arch: $ARCH"; exit 1 ;;
 esac
 
+# The release asset filename (includes the .exe suffix for Windows). We download
+# it verbatim so it matches the SHA256SUMS entry, then install as $BIN.
+ARTIFACT="qvole-${OS}-${ARCH}"
+[ "$OS" = "windows" ] && ARTIFACT="${ARTIFACT}.exe"
+
 if [ "$VERSION" = "latest" ]; then
-  URL="https://github.com/${REPO}/releases/latest/download/qvole-${OS}-${ARCH}"
+  BASE="https://github.com/${REPO}/releases/latest/download"
 else
-  URL="https://github.com/${REPO}/releases/download/${VERSION}/qvole-${OS}-${ARCH}"
+  BASE="https://github.com/${REPO}/releases/download/${VERSION}"
 fi
+URL="${BASE}/${ARTIFACT}"
+SUM_URL="${BASE}/SHA256SUMS"
 
 echo "Downloading qvole ${VERSION} for ${OS}/${ARCH}..."
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
-curl -fsSLo "${TMPDIR}/${BIN}" "$URL"
-chmod +x "${TMPDIR}/${BIN}"
+curl -fsSLo "${TMPDIR}/${ARTIFACT}" "$URL"
+
+# Verify the download against the release's SHA256SUMS before installing. The
+# checksums file is produced by the same CI run that builds the binaries. When
+# the file is present we fail closed on any mismatch or missing entry; only if
+# it cannot be fetched at all (old tags predating checksums) do we warn and
+# continue, so older releases keep working.
+if curl -fsSLo "${TMPDIR}/SHA256SUMS" "$SUM_URL" 2>/dev/null; then
+  expected=$(awk -v a="$ARTIFACT" '$2 == a {print $1}' "${TMPDIR}/SHA256SUMS")
+  if [ -z "$expected" ]; then
+    echo "error: no checksum listed for ${ARTIFACT} in SHA256SUMS" >&2
+    exit 1
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual=$(sha256sum "${TMPDIR}/${ARTIFACT}" | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    actual=$(shasum -a 256 "${TMPDIR}/${ARTIFACT}" | awk '{print $1}')
+  else
+    echo "error: no SHA-256 tool found (need sha256sum or shasum)" >&2
+    exit 1
+  fi
+  if [ "$actual" != "$expected" ]; then
+    echo "error: checksum mismatch for ${ARTIFACT}" >&2
+    echo "  expected: ${expected}" >&2
+    echo "  got:      ${actual}" >&2
+    exit 1
+  fi
+  echo "Verified checksum for ${ARTIFACT}"
+else
+  echo "warning: could not fetch SHA256SUMS; skipping verification" >&2
+fi
+
+chmod +x "${TMPDIR}/${ARTIFACT}"
 
 if [ -w "$INSTALL_DIR" ] || [ -w "$(dirname "$INSTALL_DIR")" ]; then
-  mv "${TMPDIR}/${BIN}" "$INSTALL_DIR/${BIN}"
+  mv "${TMPDIR}/${ARTIFACT}" "$INSTALL_DIR/${BIN}"
 else
   echo "Need sudo to install to ${INSTALL_DIR}:"
-  sudo mv "${TMPDIR}/${BIN}" "$INSTALL_DIR/${BIN}"
+  sudo mv "${TMPDIR}/${ARTIFACT}" "$INSTALL_DIR/${BIN}"
 fi
 
 if [ "$OS" = "darwin" ]; then

@@ -225,8 +225,8 @@ func TestQUICConfig_Defaults(t *testing.T) {
 	if cfg.MaxIncomingUniStreams != 0 {
 		t.Fatalf("expected 0 MaxIncomingUniStreams, got %d", cfg.MaxIncomingUniStreams)
 	}
-	if cfg.KeepAlivePeriod != 2*time.Second {
-		t.Fatalf("expected 2s KeepAlivePeriod, got %v", cfg.KeepAlivePeriod)
+	if cfg.KeepAlivePeriod != 5*time.Second {
+		t.Fatalf("expected 5s KeepAlivePeriod, got %v", cfg.KeepAlivePeriod)
 	}
 	if cfg.MaxIdleTimeout != 2*time.Minute {
 		t.Fatalf("expected 2m MaxIdleTimeout, got %v", cfg.MaxIdleTimeout)
@@ -238,7 +238,7 @@ func TestQUICConfig_Defaults(t *testing.T) {
 
 func TestQUICConfig_EnvOverrides(t *testing.T) {
 	os.Setenv("QVOLE_MAX_STREAMS", "500")
-	os.Setenv("QVOLE_KEEPALIVE_MS", "5000")
+	os.Setenv("QVOLE_KEEPALIVE_MS", "7000")
 	os.Setenv("QVOLE_IDLE_TIMEOUT_MS", "60000")
 	os.Setenv("QVOLE_HANDSHAKE_TIMEOUT_MS", "15000")
 	defer func() {
@@ -252,8 +252,8 @@ func TestQUICConfig_EnvOverrides(t *testing.T) {
 	if cfg.MaxIncomingStreams != 500 {
 		t.Fatalf("expected 500 MaxIncomingStreams, got %d", cfg.MaxIncomingStreams)
 	}
-	if cfg.KeepAlivePeriod != 5*time.Second {
-		t.Fatalf("expected 5s KeepAlivePeriod, got %v", cfg.KeepAlivePeriod)
+	if cfg.KeepAlivePeriod != 7*time.Second {
+		t.Fatalf("expected 7s KeepAlivePeriod, got %v", cfg.KeepAlivePeriod)
 	}
 	if cfg.MaxIdleTimeout != 60*time.Second {
 		t.Fatalf("expected 60s MaxIdleTimeout, got %v", cfg.MaxIdleTimeout)
