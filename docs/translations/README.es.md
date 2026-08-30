@@ -38,13 +38,13 @@ alice$ tar czf - dir/ | qvole pipe             # alice transmite el tar de dir/ 
 bob$   QVOLE_CODE=CODE qvole pipe | tar xzf -  # bob recibe y extrae dir/
 
 # Reenvío de puertos
+# Cada lado autoriza el destino que el otro puede alcanzar (-aF); el lado que accede elige su propio puerto local conveniente (-L).
 alice$ qvole tunnel \
     -L 8080:localhost:80 \
-    -R 2222:localhost:22
-# bob permite las solicitudes de túnel
+    -aF localhost:22
 bob$   QVOLE_CODE=CODE qvole tunnel \
     -aF localhost:80 \
-    -aL 127.0.0.1:2222
+    -L 2222:localhost:22
 alice$ curl localhost:8080    # llega al :80 de bob
 bob$   ssh -p 2222 localhost  # llega al sshd de alice
 
@@ -486,8 +486,10 @@ alice$ qvole tunnel -L 32400:localhost:32400
 bob$   QVOLE_CODE=CODE qvole tunnel -aF localhost:32400
 
 # Escotilla de escape SSH: expón sshd en una máquina muy restringida
-alice$ qvole tunnel -R 2222:localhost:22
-bob$   QVOLE_CODE=CODE qvole tunnel -aL 127.0.0.1:2222
+# Alice ejecuta sshd en :22 y autoriza el acceso del par (-aF). Reconoéctate al caer con un bucle (o consulta Persistent Tunnels para una unidad systemd).
+alice$ while true; do QVOLE_CODE=CODE qvole tunnel -aF localhost:22; sleep 1; done
+# Bob elige cualquier puerto local conveniente y llega al sshd de Alice
+bob$   QVOLE_CODE=CODE qvole tunnel -L 2222:localhost:22
 bob$   ssh -p 2222 localhost                              #Bob llega al sshd de Alice
 
 # Servidores de juego: aloja un servidor de Minecraft detrás de un NAT

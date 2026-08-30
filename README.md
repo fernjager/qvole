@@ -38,13 +38,14 @@ alice$ tar czf - dir/ | qvole pipe             # alice streams tar of dir/ to bo
 bob$   QVOLE_CODE=CODE qvole pipe | tar xzf -  # bob receives and extracts dir/
 
 # Port Forwarding
+# Each side authorizes the target the other may reach (-aF); the accessing
+# side picks its own convenient local port (-L).
 alice$ qvole tunnel \
     -L 8080:localhost:80 \
-    -R 2222:localhost:22
-# bob allows the tunnel requests
+    -aF localhost:22
 bob$   QVOLE_CODE=CODE qvole tunnel \
     -aF localhost:80 \
-    -aL 127.0.0.1:2222
+    -L 2222:localhost:22
 alice$ curl localhost:8080    # reaches bob's :80
 bob$   ssh -p 2222 localhost  # reaches alice's sshd
 
@@ -491,8 +492,11 @@ alice$ qvole tunnel -L 32400:localhost:32400
 bob$   QVOLE_CODE=CODE qvole tunnel -aF localhost:32400
 
 # SSH escape hatch: expose sshd on a locked-down machine
-alice$ qvole tunnel -R 2222:localhost:22
-bob$   QVOLE_CODE=CODE qvole tunnel -aL 127.0.0.1:2222
+# Alice hosts sshd on :22 and authorizes peer access to it (-aF). Reconnect on
+# disconnect with a loop (or see Persistent Tunnels for a systemd unit).
+alice$ while true; do QVOLE_CODE=CODE qvole tunnel -aF localhost:22; sleep 1; done
+# Bob picks any convenient local port and reaches Alice's sshd
+bob$   QVOLE_CODE=CODE qvole tunnel -L 2222:localhost:22
 bob$   ssh -p 2222 localhost                              # Bob reaches Alice's sshd
 
 # Game servers: host a Minecraft server behind NAT

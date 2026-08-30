@@ -38,13 +38,13 @@ alice$ tar czf - dir/ | qvole pipe             # alice 将 dir/ 的 tar 流发�
 bob$   QVOLE_CODE=CODE qvole pipe | tar xzf -  # bob 接收并解压 dir/
 
 # 端口转发
+# 双方各自授权对方可访问的目标（-aF）；访问方自行选择方便的本机端口（-L）。
 alice$ qvole tunnel \
     -L 8080:localhost:80 \
-    -R 2222:localhost:22
-# bob 允许隧道请求
+    -aF localhost:22
 bob$   QVOLE_CODE=CODE qvole tunnel \
     -aF localhost:80 \
-    -aL 127.0.0.1:2222
+    -L 2222:localhost:22
 alice$ curl localhost:8080    # 访问 bob 的 :80
 bob$   ssh -p 2222 localhost  # 访问 alice 的 sshd
 
@@ -475,8 +475,10 @@ alice$ qvole tunnel -L 32400:localhost:32400
 bob$   QVOLE_CODE=CODE qvole tunnel -aF localhost:32400
 
 # SSH 逃生通道：在锁定严格的机器上暴露 sshd
-alice$ qvole tunnel -R 2222:localhost:22
-bob$   QVOLE_CODE=CODE qvole tunnel -aL 127.0.0.1:2222
+# Alice 在 :22 上运行 sshd 并授权对端访问（-aF）。断线时用循环重连（或参见 Persistent Tunnels 的 systemd 单元）。
+alice$ while true; do QVOLE_CODE=CODE qvole tunnel -aF localhost:22; sleep 1; done
+# Bob 选择任意方便的本机端口，即可连到 Alice 的 sshd
+bob$   QVOLE_CODE=CODE qvole tunnel -L 2222:localhost:22
 bob$   ssh -p 2222 localhost                              #Bob 访问 Alice 的 sshd
 
 # 游戏服务器：在 NAT 之后托管 Minecraft 服务器

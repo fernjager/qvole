@@ -38,13 +38,13 @@ alice$ tar czf - dir/ | qvole pipe             # alice передаёт tar-ар
 bob$   QVOLE_CODE=CODE qvole pipe | tar xzf -  # bob получает и распаковывает dir/
 
 # Проброс портов
+# Каждая сторона разрешает цель, которой может достичь другая (-aF); обращающаяся сторона выбирает свой удобный локальный порт (-L).
 alice$ qvole tunnel \
     -L 8080:localhost:80 \
-    -R 2222:localhost:22
-# bob разрешает запросы туннеля
+    -aF localhost:22
 bob$   QVOLE_CODE=CODE qvole tunnel \
     -aF localhost:80 \
-    -aL 127.0.0.1:2222
+    -L 2222:localhost:22
 alice$ curl localhost:8080    # попадает на :80 машины bob
 bob$   ssh -p 2222 localhost  # попадает на sshd машины alice
 
@@ -486,8 +486,10 @@ alice$ qvole tunnel -L 32400:localhost:32400
 bob$   QVOLE_CODE=CODE qvole tunnel -aF localhost:32400
 
 # SSH-запасной ход: открыть sshd на машине с жёсткими ограничениями
-alice$ qvole tunnel -R 2222:localhost:22
-bob$   QVOLE_CODE=CODE qvole tunnel -aL 127.0.0.1:2222
+# Alice запускает sshd на :22 и разрешает узлу доступ к нему (-aF). Переподключайтесь при обрыве с помощью цикла (или см. Persistent Tunnels для systemd-юнита).
+alice$ while true; do QVOLE_CODE=CODE qvole tunnel -aF localhost:22; sleep 1; done
+# Bob выбирает любой удобный локальный порт и попадает на sshd машины Alice
+bob$   QVOLE_CODE=CODE qvole tunnel -L 2222:localhost:22
 bob$   ssh -p 2222 localhost                              #Bob попадает на sshd машины Alice
 
 # Игровые серверы: хостинг Minecraft-сервера за NAT
