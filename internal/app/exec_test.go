@@ -307,6 +307,34 @@ func TestSplitCommand_SingleWord(t *testing.T) {
 	}
 }
 
+func TestSplitCommand_EmptyQuotedArg(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"single quotes middle", "run '' x", []string{"run", "", "x"}},
+		{"double quotes middle", `run "" x`, []string{"run", "", "x"}},
+		{"trailing empty", "run ''", []string{"run", ""}},
+		{"leading empty", "'' run", []string{"", "run"}},
+		{"only empty arg", `''`, []string{""}},
+		{"empty glued to text", "a ''b c", []string{"a", "b", "c"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			args := SplitCommand(tc.in)
+			if len(args) != len(tc.want) {
+				t.Fatalf("SplitCommand(%q) = %v, want %v", tc.in, args, tc.want)
+			}
+			for i := range tc.want {
+				if args[i] != tc.want[i] {
+					t.Fatalf("SplitCommand(%q)[%d] = %q, want %q (all: %v)", tc.in, i, args[i], tc.want[i], args)
+				}
+			}
+		})
+	}
+}
+
 func TestRunExecCommand_EmptyCommand(t *testing.T) {
 	clientConn, serverConn := setupQUICPair(t)
 

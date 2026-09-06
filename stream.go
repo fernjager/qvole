@@ -26,8 +26,15 @@ func (c *quicStreamConn) CloseWrite() error {
 	return (*c.stream).Close()
 }
 
+// streamCloseDelay is a brief grace period between closing the stream and
+// closing the QUIC connection: once CONNECTION_CLOSE is sent, quic-go does not
+// guarantee delivery of unacknowledged stream data (mirrors pipeFinishDelay in
+// internal/engine, which is unexported).
+const streamCloseDelay = 500 * time.Millisecond
+
 func (c *quicStreamConn) Close() error {
 	err := (*c.stream).Close()
+	time.Sleep(streamCloseDelay)
 	c.conn.CloseWithError(0, "normal close")
 	return err
 }

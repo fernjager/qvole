@@ -69,8 +69,10 @@ func QUICConfig() *quic.Config {
 // non-zero, falling back to environment variables or built-in defaults.
 func QUICConfigWithOverrides(cfg PeerConfig) *quic.Config {
 	return &quic.Config{
-		MaxIncomingStreams:             int64(resolveInt(cfg.MaxStreams, "QVOLE_MAX_STREAMS", defaultMaxIncomingStreams)),
-		MaxIncomingUniStreams:          0,
+		MaxIncomingStreams: int64(resolveInt(cfg.MaxStreams, "QVOLE_MAX_STREAMS", defaultMaxIncomingStreams)),
+		// quic-go treats 0 as "use the default" (100); a negative value
+		// forbids incoming unidirectional streams entirely.
+		MaxIncomingUniStreams:          -1,
 		KeepAlivePeriod:                resolveDur(cfg.KeepAlivePeriod, "QVOLE_KEEPALIVE_MS", defaultKeepAlivePeriod),
 		MaxIdleTimeout:                 resolveDur(cfg.IdleTimeout, "QVOLE_IDLE_TIMEOUT_MS", defaultMaxIdleTimeout),
 		HandshakeIdleTimeout:           resolveDur(cfg.HandshakeTimeout, "QVOLE_HANDSHAKE_TIMEOUT_MS", defaultHandshakeIdleTimeout),

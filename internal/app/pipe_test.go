@@ -272,3 +272,35 @@ func TestStartStdinPipe_ContextCancel(t *testing.T) {
 		t.Fatal("StartStdinPipe did not exit after context cancel")
 	}
 }
+
+func TestStartStdinPipe_PeerCloseUnblocksStdin(t *testing.T) {
+	// Replace os.Stdin with a pipe that blocks on Read until closed.
+	oldStdin := os.Stdin
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdin = stdinR
+	defer func() {
+		os.Stdin = oldStdin
+		stdinW.Close()
+		stdinR.Close()
+	}()
+
+	local, peer := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		StartStdinPipe(context.Background(), local)
+		close(done)
+	}()
+
+	// The peer closing ends the rwc→stdout copy; the blocked stdin read must
+	// be interrupted as well so StartStdinPipe returns.
+	peer.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("StartStdinPipe did not return after peer closed")
+	}
+}

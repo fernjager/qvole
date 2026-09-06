@@ -3,6 +3,8 @@ package qvole
 import (
 	"testing"
 	"time"
+
+	"github.com/fernjager/qvole/internal/engine"
 )
 
 func TestDefaultOptions(t *testing.T) {
@@ -10,29 +12,40 @@ func TestDefaultOptions(t *testing.T) {
 	if o.relay != "" {
 		t.Errorf("relay should be empty by default, got %q", o.relay)
 	}
-	if o.punchTimeout != 10*time.Second {
-		t.Errorf("punchTimeout = %v, want 10s", o.punchTimeout)
+	// Fields with an engine-level env-var fallback default to zero so the
+	// engine's env → built-in-default resolution applies (see PeerConfig).
+	if o.punchTimeout != 0 {
+		t.Errorf("punchTimeout = %v, want 0 (engine env/default)", o.punchTimeout)
 	}
-	if o.exchangeDeadline != 5*time.Minute {
-		t.Errorf("exchangeDeadline = %v, want 5min", o.exchangeDeadline)
+	if o.exchangeDeadline != 0 {
+		t.Errorf("exchangeDeadline = %v, want 0 (engine env/default)", o.exchangeDeadline)
 	}
-	if o.keepAlivePeriod != 5*time.Second {
-		t.Errorf("keepAlivePeriod = %v, want 5s", o.keepAlivePeriod)
+	if o.keepAlivePeriod != 0 {
+		t.Errorf("keepAlivePeriod = %v, want 0 (engine env/default)", o.keepAlivePeriod)
 	}
-	if o.idleTimeout != 2*time.Minute {
-		t.Errorf("idleTimeout = %v, want 2min", o.idleTimeout)
+	if o.idleTimeout != 0 {
+		t.Errorf("idleTimeout = %v, want 0 (engine env/default)", o.idleTimeout)
 	}
-	if o.handshakeTimeout != 30*time.Second {
-		t.Errorf("handshakeTimeout = %v, want 30s", o.handshakeTimeout)
+	if o.handshakeTimeout != 0 {
+		t.Errorf("handshakeTimeout = %v, want 0 (engine env/default)", o.handshakeTimeout)
 	}
-	if o.maxStreams != 100 {
-		t.Errorf("maxStreams = %d, want 100", o.maxStreams)
+	if o.maxStreams != 0 {
+		t.Errorf("maxStreams = %d, want 0 (engine env/default)", o.maxStreams)
 	}
-	if o.forwardMaxStreams != 200 {
-		t.Errorf("forwardMaxStreams = %d, want 200", o.forwardMaxStreams)
+	if o.forwardMaxStreams != 0 {
+		t.Errorf("forwardMaxStreams = %d, want 0 (engine env/default)", o.forwardMaxStreams)
 	}
 	if o.streamIdleTimeout != 0 {
 		t.Errorf("streamIdleTimeout = %v, want 0 (disabled)", o.streamIdleTimeout)
+	}
+}
+
+func TestToPeerConfig_ZeroDefaults(t *testing.T) {
+	// A zero PeerConfig lets the engine apply QVOLE_* env vars and built-in
+	// defaults; non-zero defaults here would shadow them for library users.
+	cfg := toPeerConfig(defaultOptions())
+	if cfg != (engine.PeerConfig{}) {
+		t.Errorf("toPeerConfig(defaultOptions()) = %+v, want zero PeerConfig", cfg)
 	}
 }
 

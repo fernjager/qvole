@@ -144,12 +144,12 @@ conn, err := qvole.Dial(ctx,
 
 | Option | Default | Description |
 |---|---|---|
-| `WithPunchTimeout(d Duration)` | 10s | Max time for UDP hole punching |
-| `WithExchangeDeadline(d Duration)` | 5m | Max time for SPAKE2 exchange |
-| `WithKeepAlive(d Duration)` | 5s | QUIC keepalive interval |
-| `WithIdleTimeout(d Duration)` | 2min | QUIC idle timeout |
-| `WithHandshakeTimeout(d Duration)` | 30s | QUIC handshake timeout |
-| `WithMaxStreams(n int)` | 100 | Max incoming bidirectional streams |
+| `WithPunchTimeout(d Duration)` | 10s | Max time for UDP hole punching (overrides `QVOLE_PUNCH_TIMEOUT_MS` env var) |
+| `WithExchangeDeadline(d Duration)` | 90s | Max time for SPAKE2 exchange (overrides `QVOLE_EXCHANGE_DEADLINE_MS` env var) |
+| `WithKeepAlive(d Duration)` | 5s | QUIC keepalive interval (overrides `QVOLE_KEEPALIVE_MS` env var) |
+| `WithIdleTimeout(d Duration)` | 2min | QUIC idle timeout (overrides `QVOLE_IDLE_TIMEOUT_MS` env var) |
+| `WithHandshakeTimeout(d Duration)` | 30s | QUIC handshake timeout (overrides `QVOLE_HANDSHAKE_TIMEOUT_MS` env var) |
+| `WithMaxStreams(n int)` | 100 | Max incoming bidirectional streams (overrides `QVOLE_MAX_STREAMS` env var) |
 | `WithForwardMaxStreams(n int)` | 200 | Max concurrent tunnel streams (overrides `QVOLE_FORWARD_MAX_STREAMS` env var) |
 | `WithStreamIdleTimeout(d Duration)` | 0 | Inactivity window before a silent forwarded tunnel stream is reaped; `0` disables the per-stream cap (default). Refreshed on traffic, so active transfers are never cut (overrides `QVOLE_STREAM_IDLE_TIMEOUT_MS`) |
 

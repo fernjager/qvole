@@ -222,8 +222,8 @@ func TestQUICConfig_Defaults(t *testing.T) {
 	if cfg.MaxIncomingStreams != 100 {
 		t.Fatalf("expected 100 MaxIncomingStreams, got %d", cfg.MaxIncomingStreams)
 	}
-	if cfg.MaxIncomingUniStreams != 0 {
-		t.Fatalf("expected 0 MaxIncomingUniStreams, got %d", cfg.MaxIncomingUniStreams)
+	if cfg.MaxIncomingUniStreams != -1 {
+		t.Fatalf("expected -1 MaxIncomingUniStreams (forbid incoming uni streams), got %d", cfg.MaxIncomingUniStreams)
 	}
 	if cfg.KeepAlivePeriod != 5*time.Second {
 		t.Fatalf("expected 5s KeepAlivePeriod, got %v", cfg.KeepAlivePeriod)

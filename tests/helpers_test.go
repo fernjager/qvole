@@ -171,11 +171,12 @@ func captureCode(t *testing.T, logPath string, timeout time.Duration) string {
 		idx := bytes.Index(data, prefix)
 		if idx >= 0 {
 			rest := data[idx+len(prefix):]
-			end := bytes.IndexByte(rest, '\n')
-			if end < 0 {
-				end = len(rest)
+			// The code line may be a full peer command
+			// ("QVOLE_CODE=<code> qvole pipe"), so cut at the first space too.
+			if end := bytes.IndexAny(rest, " \n"); end >= 0 {
+				rest = rest[:end]
 			}
-			code := strings.TrimSpace(string(rest[:end]))
+			code := strings.TrimSpace(string(rest))
 			if code != "" {
 				return code
 			}

@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/fernjager/qvole/internal/engine"
 )
 
 func TestHandleTunnelStream_InvalidIndex(t *testing.T) {
@@ -428,6 +430,48 @@ func TestTunnelRunStreamAcceptor_ConnectionClosed(t *testing.T) {
 	}
 }
 
+func TestRunStreamAcceptor_GuardFullContextCancel(t *testing.T) {
+	clientConn, serverConn := setupQUICPair(t)
+	defer clientConn.CloseWithError(0, "test")
+
+	reqs := []TunnelRequest{
+		{Type: "L", ListenAddr: "127.0.0.1:8080", TargetAddr: "8.8.8.8:53"},
+	}
+
+	// Fill the single guard slot with a stream whose handler blocks waiting
+	// for a header, then open a second stream so the acceptor parks on the
+	// full guard.
+	s1, err := clientConn.OpenStreamSync(context.Background())
+	if err != nil {
+		t.Fatalf("open stream 1: %v", err)
+	}
+	defer s1.Close()
+	s2, err := clientConn.OpenStreamSync(context.Background())
+	if err != nil {
+		t.Fatalf("open stream 2: %v", err)
+	}
+	defer s2.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- RunStreamAcceptor(ctx, serverConn, reqs, 0, 1, TunnelAllow{}, 1, &sync.Map{}, 0)
+	}()
+
+	// Let the acceptor accept s1 (occupying the guard) and park on s2.
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != context.Canceled {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("RunStreamAcceptor parked on full guard after context cancel")
+	}
+}
+
 func TestTunnelRunTCPListeners_BindFailure(t *testing.T) {
 	// First, bind a port to create a conflict
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -544,5 +588,29 @@ func TestHandleTunnelTCP_SilentStreamReaped(t *testing.T) {
 	var b [1]byte
 	if _, err := stream.Read(b[:]); err == nil {
 		t.Fatal("expected silent stream to be reaped (closed) after the idle window")
+	}
+}
+
+func TestInitOutboundGuard_ResizesPerSession(t *testing.T) {
+	// Restore the env/default-sized guard so other tests are unaffected.
+	defer initOutboundGuard(engine.GetForwardMaxStreams())
+
+	initOutboundGuard(5)
+	if got := cap(getOutboundGuard()); got != 5 {
+		t.Fatalf("guard capacity = %d, want 5", got)
+	}
+
+	// A later session with a different limit must re-create the guard rather
+	// than keeping the first session's size.
+	initOutboundGuard(9)
+	if got := cap(getOutboundGuard()); got != 9 {
+		t.Fatalf("guard capacity = %d, want 9", got)
+	}
+
+	// Same size keeps the existing channel (no churn for repeated sessions).
+	g := getOutboundGuard()
+	initOutboundGuard(9)
+	if getOutboundGuard() != g {
+		t.Fatal("guard channel replaced although size did not change")
 	}
 }

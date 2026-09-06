@@ -81,6 +81,9 @@ func RunRelay(ctx context.Context, addr string) error {
 		go func() {
 			for p := range pktCh {
 				HandlePacket(conn, p.data, p.src)
+				// HandlePacket does not retain p.data past its return, so
+				// the buffer goes back to the pool for the read loop.
+				readPool.Put(p.data[:readBufSize])
 			}
 		}()
 	}
@@ -302,9 +305,12 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 				return
 			}
 			// Room already exists (created by another pending that completed
-			// first). Check caps before admitting.
-			shard.mu.Unlock()
+			// first). Check caps before admitting. Lock the entry before
+			// releasing the shard lock (shard → entry order) so
+			// evictStaleRooms cannot delete the entry in between and leave
+			// us admitting a client into an orphaned room.
 			entry.mu.Lock()
+			shard.mu.Unlock()
 			ipAlreadyInRoom := false
 			for addr := range entry.udpClients {
 				if ipKey(addr) == srcIP {
@@ -339,12 +345,15 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 			return
 		}
 
-		// Not in pending store; check existing rooms.
+		// Not in pending store; check existing rooms. Hold the shard lock
+		// until entry.mu is acquired (shard → entry order, same as the
+		// no-cookie path below) so evictStaleRooms cannot delete the entry
+		// in between and orphan the admission.
 		shard := shardFor(room)
 		shard.mu.RLock()
 		entry, ok := shard.rooms[room]
-		shard.mu.RUnlock()
 		if !ok {
+			shard.mu.RUnlock()
 			// The room doesn't exist: the pending registration for this cookie
 			// expired (pendingRegTTL) or was evicted. Re-issue a fresh
 			// challenge via the pending store instead of dropping, so a client
@@ -377,6 +386,7 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 			return
 		}
 		entry.mu.Lock()
+		shard.mu.RUnlock()
 		pend, exists := entry.pending[srcStr]
 		if !exists || !bytes.Equal(pend.cookie, cookieBytes) {
 			entry.mu.Unlock()
@@ -504,7 +514,15 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 		return
 	}
 
-	// Fresh pending registration.
+	// Fresh pending registration. Enforce the per-IP pending cap like the
+	// global-store paths do, counting this room's pending map as well, which
+	// countPendingForIP does not see, so a REG flood with randomized source
+	// ports against one existing room cannot grow entry.pending unboundedly.
+	if countPendingForIP(srcIP)+entry.pendingCountForIP(srcIP) >= maxPendingPerIP {
+		entry.mu.Unlock()
+		dropPacket(src, "Pending limit per IP reached for %s", srcStr)
+		return
+	}
 	cb := make([]byte, pendingCookieBytes)
 	if _, err := rand.Read(cb); err != nil {
 		entry.mu.Unlock()

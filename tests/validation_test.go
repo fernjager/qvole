@@ -53,6 +53,19 @@ func TestVersionFlag(t *testing.T) {
 	}
 }
 
+func TestVersionFlagOnlyInSubcommandPosition(t *testing.T) {
+	// A -v after the subcommand is a flag value/unknown flag, not a version
+	// request: it must not print the version and exit 0.
+	cmd := exec.Command(qvoleBin, "tunnel", "-L", "junk", "-v")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected non-zero exit, output: %s", string(out))
+	}
+	if bytes.Contains(out, []byte("protocol v")) {
+		t.Errorf("version printed for misplaced -v: %s", string(out))
+	}
+}
+
 func TestHelpFlag(t *testing.T) {
 	for _, flag := range []string{"-h", "--help", "help"} {
 		cmd := exec.Command(qvoleBin, flag)

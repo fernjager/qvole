@@ -232,8 +232,8 @@ Each peer constructs a confirm payload:
 Sent as `MSG <room> confirm <hex>\n` and retransmitted every 2 s for each
 received candidate point until a matching confirm is found from the peer.
 
-The encrypted address uses AES-256-GCM with the sorted blind points and
-the marshalled N generator as Additional Authenticated Data (AAD), binding
+The encrypted address uses AES-256-GCM with the sorted blind points as
+Additional Authenticated Data (AAD), binding
 the address to the specific exchange. Addresses are validated against a 52-byte maximum (rejecting
 longer addresses) and null-padded to exactly 52 bytes before encryption,
 ensuring a fixed ciphertext size regardless of IPv4/IPv6 address length.
@@ -326,14 +326,15 @@ Peer A (server)                           Peer B (client)
   against the fingerprint from SPAKE2 using constant-time comparison.
 - **ALPN:** `"qvole-v0.1"`.
 - **Mutual auth:** Server requires client certificate; client sends its cert.
-- **No uni-directional streams:** `MaxIncomingUniStreams = 0`.
+- **No uni-directional streams:** `MaxIncomingUniStreams = -1` (quic-go
+  clamps negative values to 0; a literal `0` would select the default of 100).
 
 **QUIC parameters:**
 
 | Parameter | Default | Env Override |
 |-----------|---------|-------------|
 | MaxIncomingStreams | 100 | `QVOLE_MAX_STREAMS` |
-| KeepAlivePeriod | 2 s | `QVOLE_KEEPALIVE_MS` |
+| KeepAlivePeriod | 5 s | `QVOLE_KEEPALIVE_MS` |
 | MaxIdleTimeout | 2 min | `QVOLE_IDLE_TIMEOUT_MS` |
 | HandshakeIdleTimeout | 30 s | `QVOLE_HANDSHAKE_TIMEOUT_MS` |
 | InitialStreamReceiveWindow | 1 MB | `QVOLE_INITIAL_STREAM_WINDOW` |
@@ -392,8 +393,8 @@ before the stream closes.
 ```
 ├─ Control Stream ────────────────────────────────────────────────┤
 │                                                                 │
-│  (race) ┌─ winner ─── sends requests ──► reads peer requests    │
-│         └─ loser ──── reads requests ◄── sends requests         │
+│  client ─── opens stream, sends requests ──► reads peer requests│
+│  server ─── accepts stream, reads requests ◄── sends requests   │
 │                                                                 │
 ├─ Data Streams ──────────────────────────────────────────────────┤
 │                                                                 │
@@ -583,7 +584,7 @@ END\n
 |--------|-------|--------|
 | Stream initiator | Opens stream when stdin is not a terminal (piped); otherwise accepts | Accepts stream |
 | Data transfer | stdin → stream, stream → stdout | stdout ← stream, stdin ← stream |
-| Exit on | Either stream closes | Either stream closes |
+| Exit on | Either stream closes (5 s half-close grace for the other direction) | Either stream closes (5 s half-close grace for the other direction) |
 
 ### Exec Mode (`qvole exec`)
 
@@ -597,7 +598,7 @@ END\n
 
 | Aspect | Side with `-L`/`-R` | Side without requests |
 |--------|---------------------|-------------------|
-| Control stream | Opens or accepts (race) | Opens or accepts (race) |
+| Control stream | Opened by client, accepted by server | Opened by client, accepted by server |
 | `-L` listener | TCP listen, opens QUIC streams | Accepts QUIC streams, dials TCP |
 | `-R` listener | Accepts QUIC streams, dials TCP | TCP listen, opens QUIC streams |
 

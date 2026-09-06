@@ -443,6 +443,18 @@ func resetPendingRegs() {
 	}
 }
 
+// pendingCountForIP returns the number of pending registrations for the given
+// IP within this room entry. Must be called with entry.mu held.
+func (entry *roomEntry) pendingCountForIP(ip string) int {
+	n := 0
+	for addr := range entry.pending {
+		if ipKey(addr) == ip {
+			n++
+		}
+	}
+	return n
+}
+
 func (entry *roomEntry) removeStaleClients(room string, now time.Time) {
 	for addr, info := range entry.udpClients {
 		if now.Sub(info.lastSeen) > regTTL {

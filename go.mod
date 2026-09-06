@@ -1,6 +1,6 @@
 module github.com/fernjager/qvole
 
-go 1.27.0
+go 1.27.1
 
 require (
 	github.com/quic-go/quic-go v0.61.0

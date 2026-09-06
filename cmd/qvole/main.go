@@ -6,9 +6,11 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 
 	"github.com/fernjager/qvole"
@@ -23,22 +25,22 @@ const (
 	defaultListenAddr = ":9009"
 )
 
-var version = "0.2.1"
+var version = "0.2.2"
 var debug bool
 
 func main() {
 	log.SetFlags(0)
 	_ = os.Setenv("QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING", "1")
 
-	for _, a := range os.Args[1:] {
-		if a == "-v" || a == "--version" {
-			fmt.Fprintf(os.Stderr, "qvole %s (protocol v%s)\n", version, engine.ProtocolVersion)
-			return
-		}
-	}
-
 	if len(os.Args) < 2 {
 		printUsage()
+		return
+	}
+
+	// -v/--version is only honored in the subcommand position; later
+	// occurrences may be flag values (e.g. exec --cmd -v).
+	if os.Args[1] == "-v" || os.Args[1] == "--version" {
+		fmt.Fprintf(os.Stderr, "qvole %s (protocol v%s)\n", version, engine.ProtocolVersion)
 		return
 	}
 
@@ -102,21 +104,49 @@ func resolveOrGenerateCode(flagVal string) (code string, generated bool, err err
 	return code, true, nil
 }
 
+// maxTunnelSpecs mirrors maxTunnelRequests in internal/app so an over-long
+// -L/-R flag list fails here, before a connection code is printed.
+const maxTunnelSpecs = 100
+
 // validateTunnelConfig parses every -L/-R spec and allowlist entry up front so
 // typos fail before a connection code is printed. It mirrors the validation
-// app.RunTunnel performs, with the same error messages.
+// app.RunTunnel performs, with the same error messages, plus the port-value
+// and spec-count checks ParseTunnelRequest does not do.
 func validateTunnelConfig(localTunnels, remoteTunnels, allowListen, allowForward []string, allowAll bool) error {
+	if n := len(localTunnels) + len(remoteTunnels); n > maxTunnelSpecs {
+		return fmt.Errorf("too many tunnel requests: %d (max %d)", n, maxTunnelSpecs)
+	}
 	for _, f := range localTunnels {
-		if _, err := app.ParseTunnelRequest(f, "L"); err != nil {
-			return fmt.Errorf("invalid -L spec %q: %w", f, err)
+		if err := validateTunnelSpec(f, "L"); err != nil {
+			return err
 		}
 	}
 	for _, f := range remoteTunnels {
-		if _, err := app.ParseTunnelRequest(f, "R"); err != nil {
-			return fmt.Errorf("invalid -R spec %q: %w", f, err)
+		if err := validateTunnelSpec(f, "R"); err != nil {
+			return err
 		}
 	}
 	return (app.TunnelAllow{All: allowAll, Listen: allowListen, Forward: allowForward}).Validate()
+}
+
+// validateTunnelSpec parses one -L/-R spec and validates the port values,
+// which ParseTunnelRequest joins into the addresses without interpreting.
+func validateTunnelSpec(spec, typ string) error {
+	req, err := app.ParseTunnelRequest(spec, typ)
+	if err != nil {
+		return fmt.Errorf("invalid -%s spec %q: %w", typ, spec, err)
+	}
+	for _, addr := range []string{req.ListenAddr, req.TargetAddr} {
+		_, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return fmt.Errorf("invalid -%s spec %q: %v", typ, spec, err)
+		}
+		p, err := strconv.Atoi(port)
+		if err != nil || p < 1 || p > 65535 {
+			return fmt.Errorf("invalid -%s spec %q: invalid port %q", typ, spec, port)
+		}
+	}
+	return nil
 }
 
 // tunnelPeerCommand builds the peer's ready-to-paste tunnel command from our
@@ -159,6 +189,12 @@ func tunnelPeerCommand(code string, localTunnels, remoteTunnels []string) (strin
 	return cmd, nil
 }
 
+// peerHintBlock formats the peer's ready-to-paste command. The comment line
+// keeps the block safe to copy-paste into a shell.
+func peerHintBlock(peerCmd string) string {
+	return "# peer command\n" + peerCmd + "\n"
+}
+
 type commonFlags struct {
 	relay string
 }
@@ -175,7 +211,7 @@ func signalContext() (context.Context, context.CancelFunc) {
 }
 
 func maybeFatal(l *util.Logger, err error) {
-	if err != nil && err != context.Canceled {
+	if err != nil && !errors.Is(err, context.Canceled) {
 		fatalf(l, "%v", err)
 	}
 }
@@ -218,7 +254,7 @@ func runPipe(args []string) {
 		fatalf(util.LogPipe, "%v", err)
 	}
 	if generated {
-		fmt.Fprintf(os.Stderr, "QVOLE_CODE=%s\n", finalCode)
+		fmt.Fprint(os.Stderr, peerHintBlock("QVOLE_CODE="+finalCode+" qvole pipe"))
 	}
 
 	ctx, cancel := signalContext()
@@ -262,7 +298,7 @@ func runExec(args []string) error {
 		fatalf(util.LogExec, "%v", err)
 	}
 	if generated {
-		fmt.Fprintf(os.Stderr, "QVOLE_CODE=%s\n", finalCode)
+		fmt.Fprint(os.Stderr, peerHintBlock("QVOLE_CODE="+finalCode+" qvole exec"))
 	}
 
 	ctx, cancel := signalContext()
@@ -271,12 +307,33 @@ func runExec(args []string) error {
 	err = app.RunExec(ctx, relayAddr, finalCode, *cmdFlag, *cmdFlag != "")
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		return exitCodeError{code: exitErr.ExitCode()}
+		if code := childExitStatus(ctx, exitErr); code != 0 {
+			return exitCodeError{code: code}
+		}
+		return nil
 	}
-	if err != nil && err != context.Canceled {
+	if err != nil && !errors.Is(err, context.Canceled) {
 		fatalf(util.LogExec, "%v", err)
 	}
 	return nil
+}
+
+// exitCodeInterrupt is the conventional shell status for SIGINT (128+SIGINT).
+const exitCodeInterrupt = 130
+
+// childExitStatus converts a child process exit error into qvole's exit code.
+// A child killed by a signal (ExitCode -1) means the run was canceled, by
+// SIGINT locally or by the peer closing the stream, which is a clean
+// shutdown, not a failure: report 130 for a local interrupt and 0 for a
+// peer-driven end, instead of the 255 that os.Exit(-1) produces.
+func childExitStatus(ctx context.Context, exitErr *exec.ExitError) int {
+	if code := exitErr.ExitCode(); code >= 0 {
+		return code
+	}
+	if ctx.Err() != nil {
+		return exitCodeInterrupt
+	}
+	return 0
 }
 
 func runTunnel(args []string) {
@@ -311,13 +368,17 @@ func runTunnel(args []string) {
 		fatalf(util.LogTunnel, "%v", err)
 	}
 	if generated {
-		fmt.Fprintf(os.Stderr, "QVOLE_CODE=%s\n", finalCode)
 		if hint, herr := tunnelPeerCommand(finalCode, localTunnels, remoteTunnels); herr != nil {
 			// Specs were validated above, so this should not happen; keep the
 			// hint failure visible rather than silently dropping it.
 			fmt.Fprintf(os.Stderr, "peer hint unavailable: %v\n", herr)
-		} else if hint != "" {
-			fmt.Fprintf(os.Stderr, "peer: %s\n", hint)
+		} else {
+			if hint == "" {
+				// No -L/-R requests: we're the pure allow side, so suggest the
+				// base command for the peer to attach their own flags to.
+				hint = "QVOLE_CODE=" + finalCode + " qvole tunnel"
+			}
+			fmt.Fprint(os.Stderr, peerHintBlock(hint))
 		}
 	}
 

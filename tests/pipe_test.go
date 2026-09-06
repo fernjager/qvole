@@ -549,3 +549,61 @@ func TestPipeStats(t *testing.T) {
 		t.Errorf("neither peer logged stats totals\nSRV: %s\nCLI: %s", string(srvData), cliData)
 	}
 }
+
+// TestPipeSilentPeerExits is a regression test for the RunPipe hang where a
+// peer whose stdin stays open but silent blocked shutdown forever after the
+// other side closed its stream: the inbound copy finished, but RunPipe kept
+// waiting on the uninterruptible stdin read. The fix closes the outbound
+// stream after a 5 s half-close grace (pipeCloseGrace), so both sides exit.
+func TestPipeSilentPeerExits(t *testing.T) {
+	relayAddr, cleanup := testRelay(t)
+	defer cleanup()
+
+	code := "9942-silent-peer-exit"
+	payload := []byte("silent-peer-payload\n")
+
+	// Server side: stdin is piped but never written to or closed.
+	srvStdinR, unblockSrv := blockingStdin()
+	defer unblockSrv()
+	srvStdout := new(bytes.Buffer)
+
+	args := pipeArgs(relayAddr, code)
+	srvCmd := exec.Command(qvoleBin, args...)
+	srvCmd.Stdin = srvStdinR
+	srvCmd.Stdout = srvStdout
+	srvCmd.Stderr = &logWriter{t: t, prefix: "[srv-stderr] "}
+	if err := srvCmd.Start(); err != nil {
+		t.Fatalf("start server: %v", err)
+	}
+	defer srvCmd.Process.Kill()
+
+	cliStdinR, cliStdinW := mustPipe(t)
+	args = pipeArgs(relayAddr, code)
+	cliCmd := exec.Command(qvoleBin, args...)
+	cliCmd.Stdin = cliStdinR
+	cliCmd.Stderr = &logWriter{t: t, prefix: "[cli-stderr] "}
+	if err := cliCmd.Start(); err != nil {
+		t.Fatalf("start client: %v", err)
+	}
+	defer cliCmd.Process.Kill()
+
+	// Client sends a finite payload, then closes its stdin, closing its
+	// outbound stream. The server must finish even though its own stdin
+	// stays open and silent.
+	if _, err := cliStdinW.Write(payload); err != nil {
+		t.Fatalf("write client stdin: %v", err)
+	}
+	cliStdinW.Close()
+
+	// Generous margin over the 5 s half-close grace + 500 ms finish delay.
+	if !waitForExit(srvCmd, 15*time.Second) {
+		t.Error("server with silent stdin did not exit after peer closed its stream")
+	}
+	if !waitForExit(cliCmd, 15*time.Second) {
+		t.Error("client did not exit after its stream closed")
+	}
+
+	if !bytes.Contains(srvStdout.Bytes(), payload) {
+		t.Errorf("server did not receive payload (got %q)", srvStdout.String())
+	}
+}

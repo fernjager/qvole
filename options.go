@@ -25,17 +25,13 @@ type options struct {
 	allowForward      []string
 }
 
+// defaultOptions returns the zero-value options. Fields with an engine-level
+// env-var fallback (punchTimeout, exchangeDeadline, keepAlivePeriod,
+// idleTimeout, handshakeTimeout, maxStreams, forwardMaxStreams; see
+// internal/engine's PeerConfig resolution) stay zero so the engine's
+// env → built-in-default chain applies; the With* options override it.
 func defaultOptions() *options {
-	return &options{
-		relay:             "",
-		punchTimeout:      10 * time.Second,
-		exchangeDeadline:  5 * time.Minute,
-		keepAlivePeriod:   5 * time.Second,
-		idleTimeout:       2 * time.Minute,
-		handshakeTimeout:  30 * time.Second,
-		maxStreams:        100,
-		forwardMaxStreams: 200,
-	}
+	return &options{}
 }
 
 // WithCode sets the shared secret code for peer authentication.

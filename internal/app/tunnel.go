@@ -26,6 +26,12 @@ import (
 // streamIdleTimeoutOverride overrides QVOLE_STREAM_IDLE_TIMEOUT_MS; 0 means use
 // env/default (which is 0, i.e. no per-stream cap).
 func RunTunnel(ctx context.Context, relayAddr, code string, localTunnels, remoteTunnels []string, allowAll bool, allowListen, allowForward []string, forwardMaxStreams int, streamIdleTimeoutOverride time.Duration) error {
+	return RunTunnelWithConfig(ctx, relayAddr, code, localTunnels, remoteTunnels, allowAll, allowListen, allowForward, forwardMaxStreams, streamIdleTimeoutOverride, engine.PeerConfig{})
+}
+
+// RunTunnelWithConfig is like RunTunnel but accepts an engine.PeerConfig for
+// tuning the connection (mirrors engine.ConnectPeerWithConfig).
+func RunTunnelWithConfig(ctx context.Context, relayAddr, code string, localTunnels, remoteTunnels []string, allowAll bool, allowListen, allowForward []string, forwardMaxStreams int, streamIdleTimeoutOverride time.Duration, cfg engine.PeerConfig) error {
 	allow := TunnelAllow{All: allowAll, Listen: allowListen, Forward: allowForward}
 	if err := allow.Validate(); err != nil {
 		return err
@@ -36,7 +42,7 @@ func RunTunnel(ctx context.Context, relayAddr, code string, localTunnels, remote
 
 	idle := streamIdleTimeout(streamIdleTimeoutOverride)
 
-	conn, isServer, err := engine.ConnectPeer(ctx, relayAddr, code)
+	conn, isServer, err := engine.ConnectPeerWithConfig(ctx, relayAddr, code, cfg)
 	if err != nil {
 		return err
 	}
@@ -291,7 +297,14 @@ func RunStreamAcceptor(ctx context.Context, conn *quic.Conn, reqs []TunnelReques
 			}
 			return err
 		}
-		guard <- struct{}{}
+		select {
+		case guard <- struct{}{}:
+		case <-ctx.Done():
+			// A sibling failure (e.g. RunTCPListeners) cancels the context;
+			// bail out instead of parking forever on a full guard.
+			stream.Close()
+			return ctx.Err()
+		}
 		go func(s *quic.Stream) {
 			defer func() { <-guard }()
 			HandleTunnelStream(ctx, s, reqs, myReqStart, myReqCount, allow, announced, idle)
@@ -371,20 +384,34 @@ func RunTCPListeners(ctx context.Context, conn *quic.Conn, reqs []TunnelRequest,
 }
 
 var (
-	outboundGuard     chan struct{}
-	outboundGuardOnce sync.Once
+	outboundGuard   chan struct{}
+	outboundGuardN  int
+	outboundGuardMu sync.Mutex
 )
 
+// initOutboundGuard (re)creates the outbound semaphore with capacity n when the
+// requested size differs from the current one, so each tunnel session's limit
+// takes effect under repeated in-process library use. In-flight handlers keep
+// releasing into the channel they acquired from, so swapping is safe.
 func initOutboundGuard(n int) {
-	outboundGuardOnce.Do(func() {
+	outboundGuardMu.Lock()
+	defer outboundGuardMu.Unlock()
+	if outboundGuard == nil || outboundGuardN != n {
 		outboundGuard = make(chan struct{}, n)
-	})
+		outboundGuardN = n
+	}
 }
 
 // getOutboundGuard returns the outbound semaphore channel, initializing it
 // lazily from GetForwardMaxStreams if initOutboundGuard was not called.
 func getOutboundGuard() chan struct{} {
-	initOutboundGuard(engine.GetForwardMaxStreams())
+	outboundGuardMu.Lock()
+	defer outboundGuardMu.Unlock()
+	if outboundGuard == nil {
+		n := engine.GetForwardMaxStreams()
+		outboundGuard = make(chan struct{}, n)
+		outboundGuardN = n
+	}
 	return outboundGuard
 }
 
@@ -451,13 +478,16 @@ func HandleTunnelTCP(ctx context.Context, conn *quic.Conn, tcpConn net.Conn, spe
 		return
 	}
 
+	// Capture the semaphore once so acquire and release use the same channel
+	// even if a later session re-creates it via initOutboundGuard.
+	guard := getOutboundGuard()
 	select {
-	case getOutboundGuard() <- struct{}{}:
+	case guard <- struct{}{}:
 	default:
 		util.LogTunnel.PrintfWarn("Outbound stream limit reached, rejecting tunnel %d", specIdx)
 		return
 	}
-	defer func() { <-getOutboundGuard() }()
+	defer func() { <-guard }()
 
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {

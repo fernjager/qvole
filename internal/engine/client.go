@@ -16,6 +16,10 @@ import (
 const (
 	statsReportInterval = 2 * time.Second
 	pipeFinishDelay     = 500 * time.Millisecond
+	// pipeCloseGrace is how long the local stdin→stream copy may keep sending
+	// after the peer closed its stream (half-close), before RunPipe closes
+	// the outbound stream and returns.
+	pipeCloseGrace = 5 * time.Second
 )
 
 // RunPipe establishes a peer-to-peer connection and bridges stdin/stdout over QUIC streams.
@@ -37,8 +41,9 @@ func RunPipe(ctx context.Context, relayAddr string, code string, stats bool) err
 
 	stdinTerm := isTerminal(os.Stdin)
 
-	var wg sync.WaitGroup
 	var out *quic.Stream
+	var closeStdin func()
+	var stdinDone chan struct{}
 
 	if !stdinTerm {
 		out, err = conn.OpenStreamSync(ctx)
@@ -48,7 +53,7 @@ func RunPipe(ctx context.Context, relayAddr string, code string, stats bool) err
 		}
 
 		var stdinOnce sync.Once
-		closeStdin := func() {
+		closeStdin = func() {
 			stdinOnce.Do(func() {
 				out.Close()
 				os.Stdin.Close()
@@ -63,23 +68,25 @@ func RunPipe(ctx context.Context, relayAddr string, code string, stats bool) err
 			closeStdin()
 		}()
 
-		wg.Add(1)
+		// The stdin copy runs detached: a stdin read blocked on a pipe cannot
+		// be interrupted by os.Stdin.Close on all platforms, so RunPipe must
+		// not wait for this goroutine once the peer is done (see below).
+		stdinDone = make(chan struct{})
 		go func() {
-			defer wg.Done()
+			defer close(stdinDone)
 			buf := BufferPool.Get().([]byte)
 			defer PutBuffer(buf)
 			dst := io.Writer(tracker.TXWriter(out))
 			io.CopyBuffer(dst, os.Stdin, buf)
-			out.Close()
+			closeStdin()
 		}()
 	}
 
 	s, acceptErr := conn.AcceptStream(ctx)
 	if acceptErr != nil {
-		if out != nil {
-			out.Close()
+		if closeStdin != nil {
+			closeStdin()
 		}
-		wg.Wait()
 		var appErr *quic.ApplicationError
 		if errors.As(acceptErr, &appErr) && appErr.ErrorCode == 0 {
 			tracker.StopAndLog()
@@ -100,16 +107,30 @@ func RunPipe(ctx context.Context, relayAddr string, code string, stats bool) err
 		return acceptErr
 	}
 
-	wg.Add(1)
+	inboundDone := make(chan struct{})
 	go func() {
-		defer wg.Done()
+		defer close(inboundDone)
 		buf := BufferPool.Get().([]byte)
 		defer PutBuffer(buf)
 		dst := io.Writer(tracker.RXWriter(os.Stdout))
 		io.CopyBuffer(dst, s, buf)
 	}()
 
-	wg.Wait()
+	<-inboundDone
+	if closeStdin != nil {
+		// The peer finished sending (PROTOCOL.md §4: pipe exits when either
+		// stream closes). Allow a half-close grace window for the local
+		// stdin→stream copy to keep sending, then close the outbound stream
+		// so the peer can finish too. If local stdin stays silent, the
+		// detached copy goroutine may remain blocked on a read; it is cleaned
+		// up on process exit.
+		select {
+		case <-stdinDone:
+		case <-time.After(pipeCloseGrace):
+		}
+		closeStdin()
+	}
+
 	tracker.StopAndLog()
 	time.Sleep(pipeFinishDelay)
 	return nil

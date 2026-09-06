@@ -145,7 +145,7 @@ func Exec(ctx context.Context, opts ...Option) error {
 	if err := validate(o); err != nil {
 		return err
 	}
-	return app.RunExec(ctx, o.relay, o.code, o.command, o.cmdMode)
+	return app.RunExecWithConfig(ctx, o.relay, o.code, o.command, o.cmdMode, toPeerConfig(o))
 }
 
 // Tunnel establishes port-forwarding tunnels between peers. Use WithLocalTunnel
@@ -158,7 +158,7 @@ func Tunnel(ctx context.Context, opts ...Option) error {
 		return err
 	}
 	cfg := toPeerConfig(o)
-	return app.RunTunnel(ctx, o.relay, o.code, o.localTunnels, o.remoteTunnels, o.allowAll, o.allowListen, o.allowForward, cfg.ForwardMaxStreams, o.streamIdleTimeout)
+	return app.RunTunnelWithConfig(ctx, o.relay, o.code, o.localTunnels, o.remoteTunnels, o.allowAll, o.allowListen, o.allowForward, cfg.ForwardMaxStreams, o.streamIdleTimeout, cfg)
 }
 
 // TunnelRequest represents a single port-forwarding tunnel specification.

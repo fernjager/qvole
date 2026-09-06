@@ -553,6 +553,69 @@ func TestHandleMsg_NilResolvedAddr(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 }
 
+func TestHandleReg_PendingCapExistingRoom(t *testing.T) {
+	relayConn, clientConn, clientAddr := setupRelayConns(t)
+	room := uniqueRoom("pending-cap")
+	registerClient(t, relayConn, clientConn, clientAddr, room)
+
+	saved := maxPendingPerIP
+	maxPendingPerIP = 3
+	defer func() { maxPendingPerIP = saved }()
+
+	// Flood the existing room with REGs from one IP, randomizing the source
+	// port so each lands as a fresh pending registration.
+	for i := 0; i < maxPendingPerIP+2; i++ {
+		src := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 30000 + i}
+		HandlePacket(relayConn, []byte("REG "+room+"\n"), src)
+	}
+
+	shard := shardFor(room)
+	shard.mu.RLock()
+	entry := shard.rooms[room]
+	shard.mu.RUnlock()
+	if entry == nil {
+		t.Fatal("room entry missing")
+	}
+	entry.mu.Lock()
+	n := len(entry.pending)
+	entry.mu.Unlock()
+	if n != maxPendingPerIP {
+		t.Fatalf("entry.pending = %d, want %d (per-IP pending cap)", n, maxPendingPerIP)
+	}
+}
+
+func TestHandleReg_ConcurrentEviction(t *testing.T) {
+	// Registrations racing the stale-room sweeper: the shard lock must be
+	// held until entry.mu is acquired, or eviction can orphan the room.
+	relayConn, clientConn, clientAddr := setupRelayConns(t)
+	room := uniqueRoom("evict-race")
+	registerClient(t, relayConn, clientConn, clientAddr, room)
+
+	shard := shardFor(room)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				shard.mu.Lock()
+				evictStaleRooms(shard)
+				shard.mu.Unlock()
+			}
+		}
+	}()
+	for i := 0; i < 20; i++ {
+		src := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 31000 + i}
+		HandlePacket(relayConn, []byte("REG "+room+"\n"), src)
+	}
+	close(stop)
+	wg.Wait()
+}
+
 func TestIsRegRateLimited_Cleanup(t *testing.T) {
 	src := "cleanup-test-src"
 	defer cleanupRegLimit(src)

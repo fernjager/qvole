@@ -5,6 +5,14 @@ import (
 	"testing"
 )
 
+func TestPeerHintBlock(t *testing.T) {
+	got := peerHintBlock("QVOLE_CODE=abc qvole pipe")
+	want := "# peer command\nQVOLE_CODE=abc qvole pipe\n"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
 func TestTunnelPeerCommand(t *testing.T) {
 	cases := []struct {
 		name    string

@@ -30,7 +30,7 @@ func readRequestsFromStream(scanner *bufio.Scanner) ([]TunnelRequest, error) {
 		if line == "END" {
 			break
 		}
-		if len(reqs) >= maxTunnelRequests*2 {
+		if len(reqs) >= maxTunnelRequests {
 			return nil, fmt.Errorf("too many tunnel requests from peer")
 		}
 		parts := strings.SplitN(line, " ", 3)

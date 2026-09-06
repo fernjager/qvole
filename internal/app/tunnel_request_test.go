@@ -215,6 +215,36 @@ func TestParseTunnelRequest_PortOnly(t *testing.T) {
 	}
 }
 
+func TestReadRequestsFromStream_PeerCap(t *testing.T) {
+	build := func(n int) string {
+		var sb strings.Builder
+		for i := 0; i < n; i++ {
+			sb.WriteString("L 127.0.0.1:8080 localhost:80\n")
+		}
+		sb.WriteString("END\n")
+		return sb.String()
+	}
+	newScanner := func(input string) *bufio.Scanner {
+		s := bufio.NewScanner(strings.NewReader(input))
+		s.Buffer(make([]byte, 0, scannerMaxTokenSize), scannerMaxTokenSize)
+		return s
+	}
+
+	// maxTunnelRequests is the per-side cap: exactly that many are accepted.
+	reqs, err := readRequestsFromStream(newScanner(build(maxTunnelRequests)))
+	if err != nil {
+		t.Fatalf("unexpected error at %d requests: %v", maxTunnelRequests, err)
+	}
+	if len(reqs) != maxTunnelRequests {
+		t.Fatalf("got %d requests, want %d", len(reqs), maxTunnelRequests)
+	}
+
+	// One more exceeds the per-side cap.
+	if _, err := readRequestsFromStream(newScanner(build(maxTunnelRequests + 1))); err == nil {
+		t.Fatal("expected error when peer exceeds maxTunnelRequests")
+	}
+}
+
 func TestReadRequestsFromStream_RejectsInvalidType(t *testing.T) {
 	validCases := []string{
 		"L 127.0.0.1:8080 localhost:80\nEND\n",

@@ -15,13 +15,25 @@ import (
 	"github.com/fernjager/qvole/internal/util"
 )
 
-const execDrainTimeout = 5 * time.Second
+const (
+	execDrainTimeout = 5 * time.Second
+	// execFinishDelay is a grace period between the command's stream ending and
+	// closing the QUIC connection: CONNECTION_CLOSE does not guarantee delivery
+	// of unacknowledged stream data (mirrors engine's pipeFinishDelay).
+	execFinishDelay = 500 * time.Millisecond
+)
 
 // RunExec connects to a peer and either runs a command locally or bridges stdin/stdout,
 // depending on cmdMode. When cmdMode is true, the local command's stdin/stdout/stderr
 // are bridged over a QUIC stream; exit code is propagated.
 func RunExec(ctx context.Context, relayAddr, code, command string, cmdMode bool) error {
-	conn, isServer, err := engine.ConnectPeer(ctx, relayAddr, code)
+	return RunExecWithConfig(ctx, relayAddr, code, command, cmdMode, engine.PeerConfig{})
+}
+
+// RunExecWithConfig is like RunExec but accepts an engine.PeerConfig for tuning
+// the connection (mirrors engine.ConnectPeerWithConfig).
+func RunExecWithConfig(ctx context.Context, relayAddr, code, command string, cmdMode bool, cfg engine.PeerConfig) error {
+	conn, isServer, err := engine.ConnectPeerWithConfig(ctx, relayAddr, code, cfg)
 	if err != nil {
 		return err
 	}
@@ -32,6 +44,9 @@ func RunExec(ctx context.Context, relayAddr, code, command string, cmdMode bool)
 		util.LogExec.PrintfSuccess("Connected as %s", role)
 		util.LogExec.PrintfInfo("Running command: %s", util.Bold(command))
 		err := RunExecCommand(ctx, conn, command)
+		// Give quic-go a brief grace period to flush and acknowledge the
+		// command's stream output before CONNECTION_CLOSE tears down delivery.
+		time.Sleep(execFinishDelay)
 		conn.CloseWithError(0, "")
 		return err
 	}
@@ -127,12 +142,14 @@ func RunPipeMode(ctx context.Context, conn *quic.Conn, role string) error {
 }
 
 // SplitCommand splits a command string into arguments using minimal shell-like parsing.
-// Only handles single quotes, double quotes, and space/tab separation.
-// Does not handle escape sequences, backtick substitution, glob expansion, redirection,
-// or pipeline operators. May return nil for unmatched quotes.
+// Only handles single quotes, double quotes, and space/tab separation. Quoted
+// empty arguments (e.g. ”) are preserved as empty strings. Does not handle
+// escape sequences, backtick substitution, glob expansion, redirection, or
+// pipeline operators. May return nil for unmatched quotes.
 func SplitCommand(s string) []string {
 	var args []string
 	var current []byte
+	started := false // any characters or quotes consumed for the current arg
 	inSingle := false
 	inDouble := false
 
@@ -156,24 +173,28 @@ func SplitCommand(s string) []string {
 		}
 		if c == '\'' {
 			inSingle = true
+			started = true
 			continue
 		}
 		if c == '"' {
 			inDouble = true
+			started = true
 			continue
 		}
 		if c == ' ' || c == '\t' {
-			if len(current) > 0 {
+			if started {
 				args = append(args, string(current))
 				current = nil
+				started = false
 			}
 			continue
 		}
 		current = append(current, c)
+		started = true
 	}
 	if inSingle || inDouble {
 		return nil
-	} else if len(current) > 0 {
+	} else if started {
 		args = append(args, string(current))
 	}
 	return args

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -134,6 +135,44 @@ func TestMaybeFatal_Nil(t *testing.T) {
 
 func TestMaybeFatal_Canceled(t *testing.T) {
 	maybeFatal(util.LogPipe, context.Canceled)
+}
+
+func TestMaybeFatal_WrappedCanceled(t *testing.T) {
+	// A wrapped cancellation (e.g. "config exchange: %w") must also shut
+	// down quietly instead of exiting via fatalf.
+	maybeFatal(util.LogPipe, fmt.Errorf("config exchange: %w", context.Canceled))
+}
+
+func TestValidateTunnelConfig_Valid(t *testing.T) {
+	err := validateTunnelConfig(
+		[]string{"8080:localhost:80", ":9090:127.0.0.1:9090", "[::1]:8081:localhost:81"},
+		[]string{"2222:localhost:22"},
+		[]string{"127.0.0.1:2222"}, []string{"localhost:80"}, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateTunnelConfig_InvalidPort(t *testing.T) {
+	for _, spec := range []string{"abc:host:80", "8080:host:xyz", "8080:host:99999", "0:host:80", "8080:host:0"} {
+		if err := validateTunnelConfig([]string{spec}, nil, nil, nil, false); err == nil {
+			t.Errorf("expected error for -L %q", spec)
+		}
+		if err := validateTunnelConfig(nil, []string{spec}, nil, nil, false); err == nil {
+			t.Errorf("expected error for -R %q", spec)
+		}
+	}
+}
+
+func TestValidateTunnelConfig_TooManySpecs(t *testing.T) {
+	specs := make([]string, maxTunnelSpecs+1)
+	for i := range specs {
+		specs[i] = fmt.Sprintf("%d:localhost:80", 10000+i)
+	}
+	err := validateTunnelConfig(specs, nil, nil, nil, false)
+	if err == nil || !strings.Contains(err.Error(), "too many") {
+		t.Fatalf("expected 'too many' error, got %v", err)
+	}
 }
 
 func TestResolveRelay_Custom(t *testing.T) {

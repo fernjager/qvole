@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-09-07
+
+### Security
+- Relay: per-IP pending cap now counts each room's pending map too. REG floods can no longer grow it unboundedly.
+- Relay: hold the shard lock until the room lock is taken. Closes an eviction race that could orphan admissions.
+- Forbid incoming unidirectional QUIC streams (`MaxIncomingUniStreams: -1`). The previous 0 meant quic-go's default of 100.
+
+### Added
+- Library `Exec` and `Tunnel` now take the full engine config, so `With*` tuning options apply to them too.
+
+### Changed
+- Generated codes now print a ready-to-paste peer command for pipe, exec, and tunnel (previously just the code).
+- Library zero-value options defer to the engine's env/default chain instead of CLI defaults.
+- Bump Go toolchain to 1.27.1.
+
+### Fixed
+- `RunPipe` no longer waits on a blocked stdin read once the peer finishes. Local stdin gets a 5s half-close grace first.
+- Stream closes now wait 500ms before closing the connection, so final data survives CONNECTION_CLOSE.
+- `SplitCommand` keeps quoted empty arguments (e.g. `run '' x`).
+- `exec`: signal-killed child exits 130 on local interrupt, 0 on peer close (was 255).
+- `-v`/`--version` only works as the subcommand, so `exec --cmd -v` no longer prints the version.
+- CLI tunnel validation fails fast on bad ports and over 100 `-L`/`-R` specs.
+- Tunnel acceptor no longer hangs on a full guard after cancel. The guard is re-created when its size changes between sessions.
+- Enforce the per-side tunnel request cap at 100 (was 2x on the read path).
+- Relay: recycle packet read buffers after handling.
+
 ## [0.2.1] - 2026-08-29
 
 ### Security

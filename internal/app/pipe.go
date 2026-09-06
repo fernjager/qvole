@@ -16,10 +16,11 @@ import (
 
 // isClosedError reports whether err is a benign error caused by one side of a
 // bidirectional copy closing the other during shutdown. This includes:
-//   - net.ErrClosed / io.ErrClosedPipe (local TCP/half-close races)
+//   - net.ErrClosed / os.ErrClosed / io.ErrClosedPipe (local TCP/half-close
+//     races, or the stdin close used to interrupt a blocked read on shutdown)
 //   - quic.ApplicationError with code 0 (graceful remote close, e.g. CloseWithError(0, ...))
 func isClosedError(err error) bool {
-	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
 		return true
 	}
 	var appErr *quic.ApplicationError
@@ -43,7 +44,7 @@ func isTimeoutError(err error) bool {
 //     end of session, e.g. CloseWithError(0, "done"));
 //   - peer disconnect (non-zero application error, idle timeout, stateless
 //     reset, transport error) → "disconnect", logged at debug level;
-//   - plain local close races (net.ErrClosed / io.ErrClosedPipe) → "";
+//   - plain local close races (net.ErrClosed / os.ErrClosed / io.ErrClosedPipe) → "";
 //   - deadline/timeout errors (tunnel inactivity window) → "timeout";
 //   - everything else → "error".
 func copyErrorKind(err error) string {
@@ -146,6 +147,14 @@ func bidirectionalCopy(a, b io.ReadWriter, refresh ...func()) {
 type stdinOut struct {
 	io.Reader
 	io.Writer
+}
+
+// Close closes os.Stdin to interrupt a blocked stdin read. bidirectionalCopy
+// closes both sides when either copy direction ends; without this, the
+// stdin→stream goroutine would stay parked in os.Stdin.Read after the peer
+// disconnects, since closing the QUIC stream only closes its send side.
+func (stdinOut) Close() error {
+	return os.Stdin.Close()
 }
 
 // StartStdinPipe bridges a stream (rwc) to stdin/stdout, handling cleanup on context cancellation.
