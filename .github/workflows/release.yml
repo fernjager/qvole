@@ -21,8 +21,8 @@ jobs:
           - { goos: windows, goarch: amd64,  goflags: "" }
           - { goos: windows, goarch: arm64,  goflags: "" }
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.27.1"
       - name: Build
@@ -37,7 +37,7 @@ jobs:
             -o "$target" ./cmd/qvole
           echo "target=$target" >> $GITHUB_ENV
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qvole-${{ matrix.goos }}-${{ matrix.goarch }}
           path: ${{ env.target }}
@@ -48,7 +48,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: qvole-*
           path: artifacts
@@ -59,7 +59,7 @@ jobs:
           (cd artifacts && sha256sum * > SHA256SUMS)
           cat artifacts/SHA256SUMS
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*
           generate_release_notes: true
