@@ -129,7 +129,13 @@ func PasswordToScalar(password string) *big.Int {
 		} else {
 			var b [8]byte
 			binary.BigEndian.PutUint64(b[:], counter)
-			in := append(pwBytes, b[:]...)
+			// Build the counter-appended input in a dedicated allocation:
+			// append(pwBytes, ...) would write into pwBytes' backing array
+			// if it ever had spare capacity, corrupting the next iteration's
+			// input (see KDF retry loop above).
+			in := make([]byte, 0, len(pwBytes)+len(b))
+			in = append(in, pwBytes...)
+			in = append(in, b[:]...)
 			h = pbkdf2.Key(in, salt, kdfIterations, 32, sha256.New)
 			ZeroBytes(in)
 		}

@@ -634,7 +634,7 @@ func TestWriteRelay(t *testing.T) {
 	clientAddr := clientConn.LocalAddr().(*net.UDPAddr)
 
 	msg := []byte("test message\n")
-	if err := writeRelay(relayConn, msg, clientAddr); err != nil {
+	if err := (&relayServer{conn: relayConn}).writeRelay(msg, clientAddr); err != nil {
 		t.Fatalf("writeRelay: %v", err)
 	}
 
@@ -805,7 +805,9 @@ func TestHandleReg_PerIPRoomLimit(t *testing.T) {
 
 	savedCount := totalRoomCount.Load()
 	savedMaxMsgRate := maxMsgRate
+	savedMaxRegRate := maxRegRate
 	maxMsgRate = 1000
+	maxRegRate = 1000
 	savedShards := make([]map[string]*roomEntry, numShards)
 	for i := range shards {
 		savedShards[i] = make(map[string]*roomEntry)
@@ -822,6 +824,7 @@ func TestHandleReg_PerIPRoomLimit(t *testing.T) {
 
 	defer func() {
 		maxMsgRate = savedMaxMsgRate
+		maxRegRate = savedMaxRegRate
 		totalRoomCount.Store(savedCount)
 		for i := range shards {
 			shard := &shards[i]
@@ -953,12 +956,15 @@ func TestPendingReg_RoomExhaustion(t *testing.T) {
 	// Save and restore state.
 	savedMaxRooms := maxRooms
 	savedMaxMsgRate := maxMsgRate
+	savedMaxRegRate := maxRegRate
 	maxRooms = 10
 	maxMsgRate = 1000
+	maxRegRate = 1000
 	savedCount := totalRoomCount.Load()
 	defer func() {
 		maxRooms = savedMaxRooms
 		maxMsgRate = savedMaxMsgRate
+		maxRegRate = savedMaxRegRate
 		totalRoomCount.Store(savedCount)
 		resetRooms()
 		resetIPCounts()
@@ -1320,5 +1326,246 @@ func TestPendingReg_PerIPLimit(t *testing.T) {
 	_, ok := readUDPLineOrNone(t, extraConn, 100*time.Millisecond)
 	if ok {
 		t.Fatal("expected no REGD when pending per-IP limit reached")
+	}
+}
+
+// Item 1: a cookie completion that hits the global room cap must evict stale
+// rooms from *all* shards, not just the target room's shard.
+func TestCookieCompletion_EvictsStaleRoomsAcrossShards(t *testing.T) {
+	resetRegRateLimits()
+	resetIPCounts()
+	resetRooms()
+
+	savedMaxRooms := maxRooms
+	maxRooms = 2
+	defer func() {
+		maxRooms = savedMaxRooms
+		resetRooms()
+		resetIPCounts()
+	}()
+
+	relayConn, clientConn, clientAddr := setupRelayConns(t)
+	room := uniqueRoom("evict-across-shards")
+
+	// Two stale, empty (evictable) rooms in a different shard.
+	other := &shards[(shardIdx(room, numShards)+1)%numShards]
+	other.mu.Lock()
+	for i := 0; i < 2; i++ {
+		other.rooms[fmt.Sprintf("evict-stale-%d", i)] = &roomEntry{
+			udpClients: map[string]*udpClient{},
+			t:          time.Now().Add(-2 * regTTL),
+		}
+	}
+	other.mu.Unlock()
+	totalRoomCount.Store(2)
+
+	// Initial REG -> pending-store challenge (room does not exist yet).
+	HandlePacket(relayConn, []byte("REG "+room+"\n"), clientAddr)
+	line, ok := readUDPLineOrNone(t, clientConn, 500*time.Millisecond)
+	if !ok || !strings.HasPrefix(line, "REGD "+room+" ") {
+		t.Fatalf("expected cookie challenge, got %q", line)
+	}
+	cookie := strings.TrimPrefix(line, "REGD "+room+" ")
+
+	// Completion must evict the other shard's stale rooms and admit.
+	HandlePacket(relayConn, []byte("REG "+room+" "+cookie+"\n"), clientAddr)
+	line2, ok := readUDPLineOrNone(t, clientConn, 500*time.Millisecond)
+	if !ok || !strings.HasPrefix(line2, "REGD "+room+" OK ") {
+		t.Fatalf("expected admission after cross-shard eviction, got %q", line2)
+	}
+	if n := totalRooms(); n != 1 {
+		t.Fatalf("totalRooms = %d, want 1 (2 stale evicted, 1 created)", n)
+	}
+}
+
+// Item 2: cookie completion into an existing room must evict stale clients
+// before computing the hard cap.
+func TestCookieCompletion_ExistingRoomEvictsStaleClients(t *testing.T) {
+	resetRegRateLimits()
+	resetIPCounts()
+	resetRooms()
+
+	savedHard := maxClientsHard
+	maxClientsHard = 2
+	defer func() {
+		maxClientsHard = savedHard
+		resetRooms()
+		resetIPCounts()
+	}()
+
+	relayConn, aConn, aAddr := setupRelayConns(t)
+	room := uniqueRoom("evict-stale-clients")
+
+	// A gets a cookie for a room that does not exist yet (global pending store).
+	HandlePacket(relayConn, []byte("REG "+room+"\n"), aAddr)
+	line, ok := readUDPLineOrNone(t, aConn, 500*time.Millisecond)
+	if !ok || !strings.HasPrefix(line, "REGD "+room+" ") {
+		t.Fatalf("expected cookie challenge, got %q", line)
+	}
+	cookie := strings.TrimPrefix(line, "REGD "+room+" ")
+
+	// The room now exists and is filled with stale clients.
+	sh := shardFor(room)
+	entry := &roomEntry{udpClients: map[string]*udpClient{}, t: time.Now().Add(-2 * regTTL)}
+	for i := 0; i < maxClientsHard; i++ {
+		addr := fmt.Sprintf("10.0.0.%d:1000", i+1)
+		entry.udpClients[addr] = &udpClient{
+			lastSeen:     time.Now().Add(-2 * regTTL),
+			rateLimiter:  rateLimiter{windowStart: time.Now()},
+			resolvedAddr: &net.UDPAddr{IP: net.IPv4(10, 0, 0, byte(i+1)), Port: 1000},
+		}
+	}
+	sh.mu.Lock()
+	sh.rooms[room] = entry
+	sh.mu.Unlock()
+	totalRoomCount.Add(1)
+
+	// A completes via the global pending store -> existing-room branch.
+	HandlePacket(relayConn, []byte("REG "+room+" "+cookie+"\n"), aAddr)
+	line2, ok := readUDPLineOrNone(t, aConn, 500*time.Millisecond)
+	if !ok || !strings.HasPrefix(line2, "REGD "+room+" OK ") {
+		t.Fatalf("expected admission after stale-client eviction, got %q", line2)
+	}
+	entry.mu.Lock()
+	_, admitted := entry.udpClients[aAddr.String()]
+	n := len(entry.udpClients)
+	entry.mu.Unlock()
+	if !admitted {
+		t.Fatal("client should be admitted after stale clients were evicted")
+	}
+	if n != 1 {
+		t.Fatalf("room has %d clients, want 1 (2 stale evicted + A)", n)
+	}
+}
+
+// Item 3: the global and in-room per-IP pending counts stay accurate across
+// store, overwrite, delete, and stale eviction.
+func TestPendingCounts_StayAccurate(t *testing.T) {
+	resetPendingRegs()
+
+	src1 := "10.1.2.3:1001"
+	src2 := "10.1.2.3:1002"
+	other := "10.9.9.9:1003"
+
+	if !storePendingReg("r1", src1, &pendingReg{createdAt: time.Now()}) {
+		t.Fatal("storePendingReg(src1) failed")
+	}
+	if !storePendingReg("r1", src2, &pendingReg{createdAt: time.Now()}) {
+		t.Fatal("storePendingReg(src2) failed")
+	}
+	if !storePendingReg("r2", other, &pendingReg{createdAt: time.Now()}) {
+		t.Fatal("storePendingReg(other) failed")
+	}
+	if n := countPendingForIP("10.1.2.3"); n != 2 {
+		t.Fatalf("countPendingForIP(10.1.2.3) = %d, want 2", n)
+	}
+	if n := int(pendingTotal.Load()); n != 3 {
+		t.Fatalf("pendingTotal = %d, want 3", n)
+	}
+
+	// Overwriting an existing key must not double-count.
+	storePendingReg("r1", src1, &pendingReg{createdAt: time.Now()})
+	if n := countPendingForIP("10.1.2.3"); n != 2 {
+		t.Fatalf("countPendingForIP after overwrite = %d, want 2", n)
+	}
+
+	deletePendingReg("r1", src1)
+	if n := countPendingForIP("10.1.2.3"); n != 1 {
+		t.Fatalf("countPendingForIP after delete = %d, want 1", n)
+	}
+
+	// Stale eviction must decrement both per-IP and global counts.
+	removeStalePendingRegs(time.Now().Add(pendingRegTTL + time.Second))
+	if n := countPendingForIP("10.1.2.3"); n != 0 {
+		t.Fatalf("countPendingForIP(10.1.2.3) after eviction = %d, want 0", n)
+	}
+	if n := countPendingForIP("10.9.9.9"); n != 0 {
+		t.Fatalf("countPendingForIP(10.9.9.9) after eviction = %d, want 0", n)
+	}
+	if n := int(pendingTotal.Load()); n != 0 {
+		t.Fatalf("pendingTotal after eviction = %d, want 0", n)
+	}
+
+	// In-room pending counts are maintained by addPending/removePending.
+	entry := &roomEntry{}
+	entry.addPending("1.2.3.4:1", "1.2.3.4", &pendingReg{})
+	entry.addPending("1.2.3.4:2", "1.2.3.4", &pendingReg{})
+	entry.addPending("5.6.7.8:3", "5.6.7.8", &pendingReg{})
+	if n := entry.pendingCountForIP("1.2.3.4"); n != 2 {
+		t.Fatalf("in-room pendingCountForIP(1.2.3.4) = %d, want 2", n)
+	}
+	entry.removePending("1.2.3.4:1")
+	if n := entry.pendingCountForIP("1.2.3.4"); n != 1 {
+		t.Fatalf("in-room pendingCountForIP after remove = %d, want 1", n)
+	}
+	entry.removePending("1.2.3.4:2")
+	if n := entry.pendingCountForIP("1.2.3.4"); n != 0 {
+		t.Fatalf("in-room pendingCountForIP after remove all = %d, want 0", n)
+	}
+}
+
+// Item 4: statMsgs must not count a MSG that had no relay targets.
+func TestHandleMsg_StatMsgsOnlyWhenRelayed(t *testing.T) {
+	resetRegRateLimits()
+	resetIPCounts()
+	resetRooms()
+	defer func() {
+		resetRooms()
+		resetIPCounts()
+	}()
+
+	relayConn, _, clientAddr := setupRelayConns(t)
+	room := uniqueRoom("stat-msgs")
+
+	sh := shardFor(room)
+	sh.mu.Lock()
+	sh.rooms[room] = &roomEntry{
+		udpClients: map[string]*udpClient{
+			clientAddr.String(): {
+				lastSeen:     time.Now(),
+				rateLimiter:  rateLimiter{windowStart: time.Now()},
+				resolvedAddr: clientAddr,
+			},
+		},
+		t: time.Now(),
+	}
+	sh.mu.Unlock()
+	totalRoomCount.Add(1)
+
+	before := statMsgs.Load()
+	// MSG from the only client in the room -> zero targets.
+	HandlePacket(relayConn, []byte("MSG "+room+" spake2 aabb\n"), clientAddr)
+	if after := statMsgs.Load(); after != before {
+		t.Fatalf("statMsgs = %d, want %d (no targets written)", after, before)
+	}
+}
+
+// Item 9: the global pending store has an overall cap, not just a per-IP one.
+func TestPendingStore_GlobalCap(t *testing.T) {
+	resetRegRateLimits()
+	resetIPCounts()
+	resetRooms()
+
+	savedGlobal := maxPendingGlobal
+	savedRegRate := maxRegRate
+	maxPendingGlobal = 3
+	maxRegRate = 1000
+	defer func() {
+		maxPendingGlobal = savedGlobal
+		maxRegRate = savedRegRate
+		resetRooms()
+		resetIPCounts()
+	}()
+
+	relayConn, _, _ := setupRelayConns(t)
+
+	// Distinct source IPs and rooms, so only the global cap can stop growth.
+	for i := 0; i < 10; i++ {
+		src := &net.UDPAddr{IP: net.IPv4(127, 0, 0, byte(i+1)), Port: 20000 + i}
+		room := uniqueRoom(fmt.Sprintf("global-cap-%d", i))
+		HandlePacket(relayConn, []byte("REG "+room+"\n"), src)
+	}
+	if n := int(pendingTotal.Load()); n != maxPendingGlobal {
+		t.Fatalf("pendingTotal = %d, want exactly %d (global cap)", n, maxPendingGlobal)
 	}
 }

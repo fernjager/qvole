@@ -34,6 +34,14 @@ var (
 	writeDeadline      time.Duration = defaultWriteDeadline
 
 	readPool sync.Pool
+)
+
+// relayServer holds the per-listener state that must not be shared between
+// RunRelay instances. Previously writePool/writeMu were package globals, so a
+// second RunRelay (tests, dual listeners, embedding) silently redirected the
+// first instance's writes into the second instance's pool.
+type relayServer struct {
+	conn *net.UDPConn
 
 	// writePool is a bounded semaphore that limits concurrent outbound
 	// writes. When non-nil (production), writes are dispatched to
@@ -44,7 +52,7 @@ var (
 	// writeMu serializes SetWriteDeadline + WriteTo pairs on the shared
 	// conn, eliminating the race between concurrent workers.
 	writeMu sync.Mutex
-)
+}
 
 func init() {
 	pktChanBuf = util.EnvInt("QVOLE_RELAY_PKT_CHAN_BUF", defaultPktChanBuf)
@@ -69,7 +77,7 @@ func RunRelay(ctx context.Context, addr string) error {
 	}
 	defer conn.Close()
 
-	writePool = make(chan struct{}, writePoolSize)
+	r := &relayServer{conn: conn, writePool: make(chan struct{}, writePoolSize)}
 
 	go func() {
 		<-ctx.Done()
@@ -80,8 +88,8 @@ func RunRelay(ctx context.Context, addr string) error {
 	for i := 0; i < relayWorkers; i++ {
 		go func() {
 			for p := range pktCh {
-				HandlePacket(conn, p.data, p.src)
-				// HandlePacket does not retain p.data past its return, so
+				r.handlePacket(p.data, p.src)
+				// handlePacket does not retain p.data past its return, so
 				// the buffer goes back to the pool for the read loop.
 				readPool.Put(p.data[:readBufSize])
 			}
@@ -137,8 +145,14 @@ type pkt struct {
 	src  *net.UDPAddr
 }
 
-// HandlePacket dispatches a raw inbound datagram to the appropriate REG/MSG handler.
+// HandlePacket dispatches a raw inbound datagram to the appropriate REG/MSG
+// handler using direct (synchronous) writes. RunRelay uses its own relayServer
+// instance, so multiple relay instances never share pool/mutex state.
 func HandlePacket(conn *net.UDPConn, data []byte, src *net.UDPAddr) {
+	(&relayServer{conn: conn}).handlePacket(data, src)
+}
+
+func (r *relayServer) handlePacket(data []byte, src *net.UDPAddr) {
 	if len(data) == 0 || len(data) > maxDatagramLen {
 		dropPacket(src, "Dropped oversized datagram (%d bytes) from %s", len(data), src)
 		return
@@ -162,10 +176,10 @@ func HandlePacket(conn *net.UDPConn, data []byte, src *net.UDPAddr) {
 			dropPacket(src, "Dropped REG with invalid room %q from %s", room, src)
 			return
 		}
-		handleReg(conn, room, cookie, src)
+		r.handleReg(room, cookie, src)
 	case len(trimmed) >= cmdPrefixLen && bytes.HasPrefix(trimmed, msgPrefix):
 		payload := trimmed[cmdPrefixLen:]
-		handleMsg(conn, payload, src)
+		r.handleMsg(payload, src)
 	default:
 		end := len(trimmed)
 		if end > unknownTypeMaxLogLen {
@@ -175,25 +189,25 @@ func HandlePacket(conn *net.UDPConn, data []byte, src *net.UDPAddr) {
 	}
 }
 
-// writeRelay sends msg to addr via conn. In production (writePool != nil),
-// writes are dispatched to a bounded goroutine pool with a per-conn mutex
-// serialising SetWriteDeadline + WriteTo. This prevents slow targets from
-// blocking relay workers (worker starvation) and eliminates the data race
-// between concurrent SetWriteDeadline calls (undefined behaviour).
-func writeRelay(conn *net.UDPConn, msg []byte, addr *net.UDPAddr) error {
-	if writePool != nil {
+// writeRelay sends msg to addr via the relay's conn. In production
+// (writePool != nil), writes are dispatched to a bounded goroutine pool with a
+// per-conn mutex serialising SetWriteDeadline + WriteTo. This prevents slow
+// targets from blocking relay workers (worker starvation) and eliminates the
+// data race between concurrent SetWriteDeadline calls (undefined behaviour).
+func (r *relayServer) writeRelay(msg []byte, addr *net.UDPAddr) error {
+	if r.writePool != nil {
 		select {
-		case writePool <- struct{}{}:
+		case r.writePool <- struct{}{}:
 		default:
 			statDrops.Add(1)
 			return nil
 		}
 		go func() {
-			defer func() { <-writePool }()
-			writeMu.Lock()
-			conn.SetWriteDeadline(time.Now().Add(writeDeadline))
-			_, err := conn.WriteTo(msg, addr)
-			writeMu.Unlock()
+			defer func() { <-r.writePool }()
+			r.writeMu.Lock()
+			r.conn.SetWriteDeadline(time.Now().Add(writeDeadline))
+			_, err := r.conn.WriteTo(msg, addr)
+			r.writeMu.Unlock()
 			if err != nil {
 				util.LogRelay.PrintfWarn("UDP write to %s failed: %v", addr, err)
 			}
@@ -201,10 +215,10 @@ func writeRelay(conn *net.UDPConn, msg []byte, addr *net.UDPAddr) error {
 		return nil
 	}
 	// Direct write (tests; writePool is nil).
-	writeMu.Lock()
-	conn.SetWriteDeadline(time.Now().Add(writeDeadline))
-	_, err := conn.WriteTo(msg, addr)
-	writeMu.Unlock()
+	r.writeMu.Lock()
+	r.conn.SetWriteDeadline(time.Now().Add(writeDeadline))
+	_, err := r.conn.WriteTo(msg, addr)
+	r.writeMu.Unlock()
 	return err
 }
 
@@ -213,14 +227,14 @@ const (
 	pendingCookieBytes = 16
 )
 
-func sendREGD(conn *net.UDPConn, room string, src *net.UDPAddr) {
-	if err := writeRelay(conn, []byte(fmt.Sprintf("REGD %s OK %s\n", room, src.String())), src); err != nil {
+func (r *relayServer) sendREGD(room string, src *net.UDPAddr) {
+	if err := r.writeRelay([]byte(fmt.Sprintf("REGD %s OK %s\n", room, src.String())), src); err != nil {
 		util.LogRelay.PrintfWarn("REGD write to %s failed: %v", src, err)
 	}
 }
 
-func sendRegChallenge(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) {
-	if err := writeRelay(conn, []byte(fmt.Sprintf("REGD %s %x\n", room, cookie)), src); err != nil {
+func (r *relayServer) sendRegChallenge(room string, cookie []byte, src *net.UDPAddr) {
+	if err := r.writeRelay([]byte(fmt.Sprintf("REGD %s %x\n", room, cookie)), src); err != nil {
 		util.LogRelay.PrintfWarn("REGD challenge write to %s failed: %v", src, err)
 	}
 }
@@ -237,7 +251,7 @@ func dropPacket(src *net.UDPAddr, format string, args ...any) {
 
 // --- UDP handlers ---
 
-func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) {
+func (r *relayServer) handleReg(room string, cookie []byte, src *net.UDPAddr) {
 	srcStr := src.String()
 	srcIP := ipKey(srcStr)
 
@@ -266,11 +280,23 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 			deletePendingReg(room, srcStr)
 
 			shard := shardFor(room)
+			// Stale rooms may live in any shard. Sweep globally *before*
+			// taking the target shard lock: acquiring other shard locks while
+			// holding this one can deadlock against another cookie completion
+			// doing the same sweep in the opposite order. No lock is held
+			// here, so this is safe.
+			if totalRooms() >= maxRooms {
+				if n := evictStaleRoomsAll(); n > 0 {
+					util.LogRelay.PrintfWarn("Evicted %d stale room(s)", n)
+				}
+			}
 			shard.mu.Lock()
 			entry, ok := shard.rooms[room]
 			if !ok {
 				// Room doesn't exist yet; create it, re-checking all caps.
 				if totalRooms() >= maxRooms {
+					// Re-sweep the target shard under its lock (covers rooms
+					// that went stale since the global sweep).
 					if n := evictStaleRooms(shard); n > 0 {
 						util.LogRelay.PrintfWarn("Evicted %d stale room(s)", n)
 					}
@@ -301,7 +327,7 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 				statRegs.Add(1)
 				util.LogRelay.Printf("Client %s joined room %s (created)", srcStr, room)
 				shard.mu.Unlock()
-				sendREGD(conn, room, src)
+				r.sendREGD(room, src)
 				return
 			}
 			// Room already exists (created by another pending that completed
@@ -311,6 +337,10 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 			// us admitting a client into an orphaned room.
 			entry.mu.Lock()
 			shard.mu.Unlock()
+			// Evict stale clients (and expired in-room pending entries) before
+			// the cap checks: an idle room's clients must not block a valid
+			// cookie completion until the next cleanup tick.
+			entry.removeStaleClients(room, time.Now())
 			ipAlreadyInRoom := false
 			for addr := range entry.udpClients {
 				if ipKey(addr) == srcIP {
@@ -341,7 +371,7 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 			statRegs.Add(1)
 			util.LogRelay.Printf("Client %s joined room %s (cookie completion)", srcStr, room)
 			entry.mu.Unlock()
-			sendREGD(conn, room, src)
+			r.sendREGD(room, src)
 			return
 		}
 
@@ -377,12 +407,15 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 				util.LogRelay.PrintfWarn("rand cookie failed: %v", err)
 				return
 			}
-			storePendingReg(room, srcStr, &pendingReg{
+			if !storePendingReg(room, srcStr, &pendingReg{
 				cookie:       cb,
 				createdAt:    time.Now(),
 				resolvedAddr: src,
-			})
-			sendRegChallenge(conn, room, cb, src)
+			}) {
+				dropPacket(src, "Pending store full for %s", srcStr)
+				return
+			}
+			r.sendRegChallenge(room, cb, src)
 			return
 		}
 		entry.mu.Lock()
@@ -393,7 +426,11 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 			dropPacket(src, "Dropped REG with mismatched cookie from %s in room %s", srcStr, room)
 			return
 		}
-		// Cookie matches; admit the client, re-checking caps.
+		// Cookie matches; admit the client, re-checking caps. Evict stale
+		// clients first so an idle room's clients do not count against the
+		// hard cap (pend was captured above, so this cannot invalidate the
+		// completion).
+		entry.removeStaleClients(room, time.Now())
 		if len(entry.udpClients) >= maxClientsHard && entry.udpClients[srcStr] == nil {
 			entry.mu.Unlock()
 			dropPacket(src, "Room %s at hard cap (%d), rejecting %s (cookie admission)", room, maxClientsHard, srcStr)
@@ -413,7 +450,7 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 				return
 			}
 		}
-		delete(entry.pending, srcStr)
+		entry.removePending(srcStr)
 		u := &udpClient{
 			lastSeen:     time.Now(),
 			rateLimiter:  rateLimiter{windowStart: time.Now()},
@@ -439,7 +476,7 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 		util.LogRelay.Printf("Client %s joined room %s", srcStr, room)
 		entry.mu.Unlock()
 
-		sendREGD(conn, room, src)
+		r.sendREGD(room, src)
 		return
 	}
 
@@ -474,12 +511,15 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 			util.LogRelay.PrintfWarn("rand cookie failed: %v", err)
 			return
 		}
-		storePendingReg(room, srcStr, &pendingReg{
+		if !storePendingReg(room, srcStr, &pendingReg{
 			cookie:       cb,
 			createdAt:    time.Now(),
 			resolvedAddr: src,
-		})
-		sendRegChallenge(conn, room, cb, src)
+		}) {
+			dropPacket(src, "Pending store full for %s", srcStr)
+			return
+		}
+		r.sendRegChallenge(room, cb, src)
 		return
 	}
 	entry.mu.Lock()
@@ -487,7 +527,8 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 
 	entry.removeStaleClients(room, time.Now())
 
-	// Check hard cap (must also account for pending entries).
+	// Check hard cap. This counts admitted udpClients only; in-room pending
+	// registrations are bounded separately by the per-IP pending cap below.
 	if len(entry.udpClients) >= maxClientsHard && entry.udpClients[srcStr] == nil {
 		entry.mu.Unlock()
 		dropPacket(src, "Room %s at hard cap (%d), rejecting %s", room, maxClientsHard, srcStr)
@@ -500,7 +541,7 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 		entry.udpClients[srcStr].resolvedAddr = src
 		entry.mu.Unlock()
 		statRegs.Add(1)
-		sendREGD(conn, room, src)
+		r.sendREGD(room, src)
 		return
 	}
 
@@ -510,7 +551,7 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 		pend.resolvedAddr = src
 		cb := pend.cookie
 		entry.mu.Unlock()
-		sendRegChallenge(conn, room, cb, src)
+		r.sendRegChallenge(room, cb, src)
 		return
 	}
 
@@ -529,15 +570,12 @@ func handleReg(conn *net.UDPConn, room string, cookie []byte, src *net.UDPAddr) 
 		util.LogRelay.PrintfWarn("rand cookie failed: %v", err)
 		return
 	}
-	if entry.pending == nil {
-		entry.pending = make(map[string]*pendingReg)
-	}
-	entry.pending[srcStr] = &pendingReg{cookie: cb, createdAt: time.Now(), resolvedAddr: src}
+	entry.addPending(srcStr, srcIP, &pendingReg{cookie: cb, createdAt: time.Now(), resolvedAddr: src})
 	entry.mu.Unlock()
-	sendRegChallenge(conn, room, cb, src)
+	r.sendRegChallenge(room, cb, src)
 }
 
-func handleMsg(conn *net.UDPConn, payload []byte, src *net.UDPAddr) {
+func (r *relayServer) handleMsg(payload []byte, src *net.UDPAddr) {
 	parts := bytes.SplitN(payload, []byte(" "), 3)
 	if len(parts) != 3 {
 		dropPacket(src, "Dropped malformed MSG from %s", src)
@@ -591,7 +629,11 @@ func handleMsg(conn *net.UDPConn, payload []byte, src *net.UDPAddr) {
 
 	msgWire := []byte(fmt.Sprintf("MSGD %s %s\n", phase, body))
 	for _, t := range targets {
-		_ = writeRelay(conn, msgWire, t)
+		_ = r.writeRelay(msgWire, t)
 	}
-	statMsgs.Add(1)
+	// Count only messages actually relayed to at least one peer; a MSG from
+	// the only client in a room writes nothing.
+	if len(targets) > 0 {
+		statMsgs.Add(1)
+	}
 }

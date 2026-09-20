@@ -3,7 +3,9 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -360,5 +362,50 @@ func TestRunExecCommand_EmptyCommand(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("RunExecCommand did not return")
+	}
+}
+
+// TestRunExecCommand_StdinEOFDoesNotKillChild guards against treating a stdin
+// half-close (empty stdin, e.g. `qvole exec < /dev/null`) as a disconnect: the
+// child must be allowed to finish and its real exit code preserved.
+func TestRunExecCommand_StdinEOFDoesNotKillChild(t *testing.T) {
+	clientConn, serverConn := setupQUICPair(t)
+
+	execDone := make(chan error, 1)
+	go func() {
+		// Prints once (announcing the stream) then keeps running.
+		execDone <- RunExecCommand(context.Background(), serverConn, "sh -c 'echo ready; sleep 1; exit 3'")
+	}()
+
+	stream, err := clientConn.AcceptStream(context.Background())
+	if err != nil {
+		t.Fatalf("accept stream: %v", err)
+	}
+
+	// Wait until the command is running and the stream has been announced.
+	buf := make([]byte, 16)
+	stream.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := stream.Read(buf); err != nil {
+		t.Fatalf("read ready: %v", err)
+	}
+
+	// Emulate empty stdin: half-close the send direction only.
+	if err := stream.Close(); err != nil {
+		t.Fatalf("close send side: %v", err)
+	}
+	go io.Copy(io.Discard, stream)
+
+	select {
+	case err = <-execDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunExecCommand did not return")
+	}
+
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected *exec.ExitError, got %T: %v", err, err)
+	}
+	if got := exitErr.ExitCode(); got != 3 {
+		t.Fatalf("child exit code = %d, want 3 (stdin EOF must not kill the child)", got)
 	}
 }

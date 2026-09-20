@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync/atomic"
 	"time"
 )
 
@@ -13,7 +14,9 @@ var disableColors bool
 
 // Debug controls whether Printf-level log messages are shown.
 // Error, warning, success, and fatal messages are always shown regardless.
-var Debug bool
+// It is an atomic so a logging goroutine may read it while a caller (e.g. a
+// library embedding the engine) flips it at runtime without a data race.
+var Debug atomic.Bool
 
 func init() {
 	if os.Getenv("NO_COLOR") != "" {
@@ -58,7 +61,7 @@ func (l *Logger) logf(msgColor, format string, args ...any) string {
 }
 
 func (l *Logger) Printf(format string, args ...any) {
-	if !Debug {
+	if !Debug.Load() {
 		return
 	}
 	log.Output(3, l.logf("", format, args...))

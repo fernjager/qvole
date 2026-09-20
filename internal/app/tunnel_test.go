@@ -307,9 +307,12 @@ func TestHandleTunnelTCP_WriteHeaderError(t *testing.T) {
 }
 
 func TestHandleTunnelStream_DialTimeout(t *testing.T) {
+	// Bound the dial so the test is fast; the target is unroutable.
+	t.Setenv("QVOLE_DIAL_TIMEOUT_MS", "250")
+
 	clientConn, serverConn := setupQUICPair(t)
 
-	// Use TEST-NET-1 (192.0.2.0/24) which is unroutable; dial should timeout/fail
+	// Use TEST-NET-1 (192.0.2.0/24) which is unroutable; dial should timeout/fail.
 	reqs := []TunnelRequest{
 		{Type: "R", ListenAddr: "127.0.0.1:8080", TargetAddr: "192.0.2.1:9999"},
 	}
@@ -331,15 +334,63 @@ func TestHandleTunnelStream_DialTimeout(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, 0, TunnelAllow{}, &sync.Map{}, 0)
+		// myReqStart=0, myReqCount=1 => this is my -R spec, so the handler
+		// dials TargetAddr (previously myReqCount=0 made it return before the
+		// allowlist check and the dial, asserting nothing).
+		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, 1, TunnelAllow{}, &sync.Map{}, 0)
 		close(done)
 	}()
 
-	select {
-	case <-done:
-	case <-time.After(15 * time.Second):
-		t.Fatal("HandleTunnelStream did not return after dial timeout")
+	waitDone(t, done, "dial timeout")
+}
+
+// TestHandleTunnelStream_DialsTarget deterministically proves the handler
+// reaches the dial path: it dials a real local listener. The dial-timeout
+// itself is exercised by TestHandleTunnelStream_AllowlistRejection.
+func TestHandleTunnelStream_DialsTarget(t *testing.T) {
+	clientConn, serverConn := setupQUICPair(t)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
 	}
+	defer ln.Close()
+
+	reqs := []TunnelRequest{
+		{Type: "R", ListenAddr: "127.0.0.1:8080", TargetAddr: ln.Addr().String()},
+	}
+
+	stream, err := clientConn.OpenStreamSync(context.Background())
+	if err != nil {
+		t.Fatalf("open stream: %v", err)
+	}
+	var header [2]byte
+	binary.BigEndian.PutUint16(header[:], 0)
+	stream.Write(header[:])
+	stream.Close()
+
+	acceptedStream, err := serverConn.AcceptStream(context.Background())
+	if err != nil {
+		t.Fatalf("accept stream: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		// my -R spec: the handler dials TargetAddr (no allowlist applies).
+		HandleTunnelStream(context.Background(), acceptedStream, reqs, 0, 1, TunnelAllow{}, &sync.Map{}, 0)
+		close(done)
+	}()
+
+	if l, ok := ln.(*net.TCPListener); ok {
+		l.SetDeadline(time.Now().Add(3 * time.Second))
+	}
+	tcpConn, err := ln.Accept()
+	if err != nil {
+		t.Fatalf("handler did not dial the target: %v", err)
+	}
+	tcpConn.Close()
+	acceptedStream.Close()
+	waitDone(t, done, "dialing tunnel")
 }
 
 func TestHandleTunnelStream_ShortHeader(t *testing.T) {

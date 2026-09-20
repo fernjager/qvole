@@ -33,7 +33,7 @@ func LogDisconnect(l *util.Logger, err error) bool {
 	if !IsPeerDisconnect(err) {
 		return false
 	}
-	if util.Debug {
+	if util.Debug.Load() {
 		l.PrintfWarn("Remote host disconnected: %v", err)
 	} else {
 		l.PrintfWarn("Remote host disconnected")

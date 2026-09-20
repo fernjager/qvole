@@ -20,6 +20,8 @@ Two machines, both behind NAT. Share a short code with your peer and you have an
 
 Forward ports, transfer files, run remote commands and pipes. A single binary, no config files, no setup.
 
+A Rust port lives at [`qvole-rs`](https://github.com/fernjager/qvole-rs).
+
 <p align="center"><img src="assets/demo.gif" alt="qvole demo"></p>
 
 ---

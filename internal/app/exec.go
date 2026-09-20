@@ -56,8 +56,15 @@ func RunExecWithConfig(ctx context.Context, relayAddr, code, command string, cmd
 
 // RunExecCommand opens a QUIC stream, runs the given command with stdin/stdout bridged
 // to the stream, and returns the command's exit error.
-// When the peer disconnects (stream EOF), the child process is killed via context cancellation.
+// A stream EOF is the peer's stdin half-close (e.g. `qvole exec < /dev/null`)
+// and does not stop the command; the child is killed only when the parent
+// context is canceled or the QUIC connection is lost.
 func RunExecCommand(ctx context.Context, conn *quic.Conn, command string) error {
+	// quic-go does not signal locally-opened streams to the peer until data is
+	// sent or the stream is closed (and a 0-byte write does not announce). A
+	// command that produces no output before reading stdin therefore cannot be
+	// accepted by the peer until it writes or exits; see "Known Limitations" in
+	// docs/PROTOCOL.md. Fixing that needs a coordinated protocol change.
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
 		return err
@@ -71,6 +78,19 @@ func RunExecCommand(ctx context.Context, conn *quic.Conn, command string) error 
 
 	execCtx, execCancel := context.WithCancel(ctx)
 	defer execCancel()
+
+	// Kill the child only when the session is actually over: the parent
+	// context was canceled, or the peer connection was lost. Treating a
+	// stdin half-close as a disconnect would SIGKILL a command that is still
+	// producing output and lose its real exit code.
+	connDone := conn.Context().Done()
+	go func() {
+		select {
+		case <-connDone:
+			execCancel()
+		case <-execCtx.Done():
+		}
+	}()
 
 	cmd := exec.CommandContext(execCtx, args[0], args[1:]...)
 	cmd.SysProcAttr = childSysProcAttr()
@@ -89,7 +109,6 @@ func RunExecCommand(ctx context.Context, conn *quic.Conn, command string) error 
 	go func() {
 		io.Copy(stdin, stream)
 		stdin.Close()
-		execCancel()
 		close(copyDone)
 	}()
 

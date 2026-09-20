@@ -214,6 +214,12 @@ func TestRelayConstants(t *testing.T) {
 	if maxMsgRate != 10 {
 		t.Errorf("maxMsgRate = %d, want 10", maxMsgRate)
 	}
+	if maxRegRate != 10 {
+		t.Errorf("maxRegRate = %d, want 10", maxRegRate)
+	}
+	if maxPendingGlobal != 65536 {
+		t.Errorf("maxPendingGlobal = %d, want 65536", maxPendingGlobal)
+	}
 	if maxDatagramLen != 1400 {
 		t.Errorf("maxDatagramLen = %d, want 1400", maxDatagramLen)
 	}
@@ -245,9 +251,9 @@ func cleanupRegLimit(src string) {
 func TestIsRegRateLimited_UnderLimit(t *testing.T) {
 	src := "test-src"
 	defer cleanupRegLimit(src)
-	for i := 0; i < maxMsgRate; i++ {
+	for i := 0; i < maxRegRate; i++ {
 		if isRegRateLimited(src) {
-			t.Fatalf("reg rate limited at call %d, max is %d", i+1, maxMsgRate)
+			t.Fatalf("reg rate limited at call %d, max is %d", i+1, maxRegRate)
 		}
 	}
 }
@@ -255,11 +261,11 @@ func TestIsRegRateLimited_UnderLimit(t *testing.T) {
 func TestIsRegRateLimited_OverLimit(t *testing.T) {
 	src := "test-src"
 	defer cleanupRegLimit(src)
-	for i := 0; i < maxMsgRate; i++ {
+	for i := 0; i < maxRegRate; i++ {
 		isRegRateLimited(src)
 	}
 	if !isRegRateLimited(src) {
-		t.Fatal("expected reg rate limited after exceeding maxMsgRate")
+		t.Fatal("expected reg rate limited after exceeding maxRegRate")
 	}
 }
 
@@ -268,7 +274,7 @@ func TestIsRegRateLimited_SeparateSources(t *testing.T) {
 	defer cleanupRegLimit(src1)
 	src2 := "src-2"
 	defer cleanupRegLimit(src2)
-	for i := 0; i < maxMsgRate; i++ {
+	for i := 0; i < maxRegRate; i++ {
 		isRegRateLimited(src1)
 		if isRegRateLimited(src2) {
 			t.Fatalf("src2 rate limited after src1 activity")
@@ -279,7 +285,7 @@ func TestIsRegRateLimited_SeparateSources(t *testing.T) {
 func TestIsRegRateLimited_WindowReset(t *testing.T) {
 	src := "test-src"
 	defer cleanupRegLimit(src)
-	for i := 0; i < maxMsgRate; i++ {
+	for i := 0; i < maxRegRate; i++ {
 		isRegRateLimited(src)
 	}
 	if !isRegRateLimited(src) {
@@ -619,7 +625,7 @@ func TestHandleReg_ConcurrentEviction(t *testing.T) {
 func TestIsRegRateLimited_Cleanup(t *testing.T) {
 	src := "cleanup-test-src"
 	defer cleanupRegLimit(src)
-	for i := 0; i < maxMsgRate; i++ {
+	for i := 0; i < maxRegRate; i++ {
 		isRegRateLimited(src)
 	}
 

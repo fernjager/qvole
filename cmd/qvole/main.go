@@ -25,7 +25,7 @@ const (
 	defaultListenAddr = ":9009"
 )
 
-var version = "0.2.2"
+var version = "0.2.3"
 var debug bool
 
 func main() {
@@ -227,7 +227,7 @@ func runRelay(args []string) {
 	if err := fs.Parse(args); err != nil {
 		fatalf(util.LogRelay, "flag: %v", err)
 	}
-	util.Debug = debug
+	util.Debug.Store(debug)
 
 	ctx, cancel := signalContext()
 	defer cancel()
@@ -245,7 +245,7 @@ func runPipe(args []string) {
 	if err := fs.Parse(args); err != nil {
 		fatalf(util.LogPipe, "flag: %v", err)
 	}
-	util.Debug = debug
+	util.Debug.Store(debug)
 
 	relayAddr := resolveRelay(cf.relay)
 
@@ -289,7 +289,7 @@ func runExec(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		fatalf(util.LogExec, "flag: %v", err)
 	}
-	util.Debug = debug
+	util.Debug.Store(debug)
 
 	relayAddr := resolveRelay(cf.relay)
 
@@ -352,7 +352,7 @@ func runTunnel(args []string) {
 	if err := fs.Parse(args); err != nil {
 		fatalf(util.LogTunnel, "flag: %v", err)
 	}
-	util.Debug = debug
+	util.Debug.Store(debug)
 
 	relayAddr := resolveRelay(cf.relay)
 

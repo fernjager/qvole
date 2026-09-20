@@ -361,6 +361,9 @@ Local peer                              Remote peer
 Two goroutines copy data in opposite directions using pooled 32 KB buffers.
 A `sync.Once` ensures both sides close when either direction completes.
 
+See section 7 for the stream-announcement limit that applies when neither peer
+sends a byte or closes its stream.
+
 #### Exec Mode (`qvole exec --cmd "command"`)
 
 ```
@@ -387,6 +390,9 @@ from the command side to the peer side.
 After the command exits, the stream is drained for up to 5 s (configurable via
 `QVOLE_EXEC_DRAIN_TIMEOUT_MS`) to allow the peer to receive any buffered output
 before the stream closes.
+
+See section 7 before relying on a command that reads stdin before writing any
+output.
 
 #### Tunnel Mode (`qvole tunnel -L ... -R ...`)
 
@@ -658,3 +664,60 @@ model; pipe and exec modes remain interoperable with `0.1.x`.
 
 The software version displayed by `qvole --version` is the `version` variable in
 `cmd/qvole/main.go` and is set independently of `ProtocolVersion`.
+
+---
+
+## 7. Known Limitations
+
+### 7.1 Locally opened streams are announced by the first byte or FIN
+
+QUIC has no "open stream" frame. A stream becomes visible to the peer only when
+a frame naming its stream ID arrives, which in practice is a STREAM frame.
+quic-go's `OpenStreamSync` allocates a stream ID locally and returns a handle
+without sending anything, so a locally opened stream is invisible until either
+data is written or the send side is closed:
+
+| Opener does | Peer's `AcceptStream` |
+|---|---|
+| `OpenStreamSync`, no write | blocks |
+| `OpenStreamSync`, zero-byte `Write` | blocks |
+| `OpenStreamSync`, `Close` (FIN) | returns |
+
+A zero-byte write does not announce the stream. This is quic-go behavior, not a
+QUIC requirement; other stacks may differ.
+
+Tunnel data streams are unaffected because the initiator always writes the
+2-byte spec index immediately after opening (section 3.5), and the control
+stream writes its config on open. `pipe` and `exec` carry raw unframed
+payloads, so the initiator stays silent until stdin or the command produces its
+first byte.
+
+### 7.2 Consequences for pipe and exec
+
+- **Exec:** the `--cmd` side opens the stream and runs the command with its
+  stdout bound to the stream. A command that blocks on stdin before producing
+  any output (`cat`, a bare `read`, an interactive shell with no prompt) is
+  never announced, so the peer never returns from `AcceptStream` and never sends
+  the stdin that would unblock the command. This is a mutual deadlock, not a
+  delay. With the default 5 s keepalive and 2 minute idle timeout, the
+  connection does not time out, so the session hangs until interrupted or the
+  connection is lost.
+- **Pipe:** the peer whose stdin is not a terminal opens a stream. If that stdin
+  stays open and silent (a FIFO with no writer, a `tail -f` with no new output)
+  and the other peer has nothing to send either, both peers block in
+  `AcceptStream`. `pipe < /dev/null` is fine because EOF closes the send side
+  immediately, and a file with data is fine because the first byte announces
+  the stream.
+
+### 7.3 Workaround and fix
+
+Ensure at least one peer sends a byte or closes its send direction. For exec,
+use a command that writes before it reads (most do); avoid `cat` and a bare
+`read`. No client flag changes this behavior.
+
+A real fix writes a small application-level header immediately after
+`OpenStreamSync`, as the tunnel data stream already does, and strips it on read.
+Because pipe and exec are currently wire-compatible with `0.1.x` peers over
+ALPN `qvole-v0.1` (section 6), adding a header is wire-breaking and requires
+either a protocol version bump or an explicit capability negotiated during the
+handshake.

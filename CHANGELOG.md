@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-09-20
+
+### Security
+- Relay: bound the pre-cookie pending store globally with `QVOLE_RELAY_MAX_PENDING` (default 65536). The per-IP cap alone could not stop a flood spread across many source IPs.
+- Relay: give REG its own rate limit (`QVOLE_RELAY_REG_RATE`, default 10/s) instead of sharing the MSG rate.
+- Relay: keep the write pool and write mutex per listener instead of in package globals, so concurrent relay instances no longer share write state.
+- SPAKE2: build the counter-appended PBKDF2 input in `PasswordToScalar` with a dedicated allocation, removing an `append` aliasing hazard on the retry path.
+- Logger: make `util.Debug` atomic, closing a data race when debug mode is toggled while logging.
+
+### Fixed
+- `exec`: a peer stdin EOF no longer kills the child. The child is stopped only when the parent context is canceled or the QUIC connection is lost, so commands that read stdin keep running and report their real exit code.
+- `pipe`: stats teardown, including the final totals and the finish delay, now runs on every return path, so the periodic reporter always stops and trailing stream data survives CONNECTION_CLOSE.
+- Relay: sweep stale rooms across all shards before taking the target shard lock during cookie completion, closing a lock-order deadlock.
+- Relay: evict stale clients and expired in-room pending entries before the cap checks when a cookie completes into an existing room, so an idle room no longer blocks a valid admission.
+- Relay: `countPendingForIP` and the in-room pending count are O(1) via per-IP counters instead of full scans.
+- Relay: count a MSG in the stats only when it was actually relayed to at least one peer.
+- Relay: drop and log a REG when the pending store is full instead of growing it without bound.
+
+### Added
+- Relay environment knobs `QVOLE_RELAY_REG_RATE` and `QVOLE_RELAY_MAX_PENDING`.
+
+### Changed
+- Update `github.com/quic-go/quic-go` to v0.62.0 (adds RFC 9218 stream priorities; requires Go 1.26+).
+- Update `golang.org/x/crypto` to v0.57.0, `golang.org/x/net` to v0.59.0, `golang.org/x/sys` to v0.48.0.
+- Bump `golangci-lint` to v2.13.2 (CI).
+- Bump CI actions to `checkout@v7`, `setup-go@v7`, `upload-artifact@v7`, `download-artifact@v8`, and `action-gh-release@v3`.
+- Container runtime image moves to `alpine:3.24`.
+
+### Docs
+- Document the quic-go stream-announcement limit for locally opened streams in `docs/PROTOCOL.md` (Known Limitations): a stream that produces no output before reading stdin is not accepted by the peer until it writes or exits. A real fix needs a coordinated protocol change.
+- Note the Rust port at https://github.com/fernjager/qvole-rs.
+
 ## [0.2.2] - 2026-09-07
 
 ### Security

@@ -38,6 +38,14 @@ func RunPipe(ctx context.Context, relayAddr string, code string, stats bool) err
 	if stats {
 		tracker.Start(statsReportInterval)
 	}
+	// Teardown is unconditional: every return path must stop the periodic
+	// reporter, and the finish delay must elapse before the deferred
+	// conn.CloseWithError fires (CONNECTION_CLOSE does not guarantee delivery
+	// of unacknowledged stream data). StopAndLog is idempotent.
+	defer func() {
+		tracker.StopAndLog()
+		time.Sleep(pipeFinishDelay)
+	}()
 
 	stdinTerm := isTerminal(os.Stdin)
 
@@ -89,13 +97,9 @@ func RunPipe(ctx context.Context, relayAddr string, code string, stats bool) err
 		}
 		var appErr *quic.ApplicationError
 		if errors.As(acceptErr, &appErr) && appErr.ErrorCode == 0 {
-			tracker.StopAndLog()
-			time.Sleep(pipeFinishDelay)
 			return nil
 		}
 		if LogDisconnect(util.LogPipe, acceptErr) {
-			tracker.StopAndLog()
-			time.Sleep(pipeFinishDelay)
 			return nil
 		}
 		if errors.Is(acceptErr, context.Canceled) {
@@ -131,8 +135,6 @@ func RunPipe(ctx context.Context, relayAddr string, code string, stats bool) err
 		closeStdin()
 	}
 
-	tracker.StopAndLog()
-	time.Sleep(pipeFinishDelay)
 	return nil
 }
 

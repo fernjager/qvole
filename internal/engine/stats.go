@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,9 +23,10 @@ func (dw *directionWriter) Write(p []byte) (int, error) {
 
 // StatsTracker tracks TX/RX byte counts for throughput reporting.
 type StatsTracker struct {
-	tx   atomic.Int64
-	rx   atomic.Int64
-	done chan struct{}
+	tx       atomic.Int64
+	rx       atomic.Int64
+	done     chan struct{}
+	stopOnce sync.Once
 }
 
 // NewStatsTracker creates a new StatsTracker ready for use.
@@ -83,15 +85,20 @@ func (st *StatsTracker) Start(interval time.Duration) {
 }
 
 // StopAndLog stops the periodic logger and prints the final totals.
+// It is idempotent: teardown may be reached from more than one path (e.g. a
+// deferred call plus an explicit one), and closing an already-closed channel
+// would panic.
 func (st *StatsTracker) StopAndLog() {
-	close(st.done)
-	tx := st.tx.Load()
-	rx := st.rx.Load()
-	if tx > 0 || rx > 0 {
-		util.LogPipe.PrintfInfo("Total: ↑ %s  ↓ %s", util.Bold(formatBytes(tx)), util.Bold(formatBytes(rx)))
-	} else {
-		util.LogPipe.PrintfSuccess("Done!")
-	}
+	st.stopOnce.Do(func() {
+		close(st.done)
+		tx := st.tx.Load()
+		rx := st.rx.Load()
+		if tx > 0 || rx > 0 {
+			util.LogPipe.PrintfInfo("Total: ↑ %s  ↓ %s", util.Bold(formatBytes(tx)), util.Bold(formatBytes(rx)))
+		} else {
+			util.LogPipe.PrintfSuccess("Done!")
+		}
+	})
 }
 
 func formatBytesValue(val float64, suffix string, exactInt bool) string {
