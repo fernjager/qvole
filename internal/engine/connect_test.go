@@ -138,8 +138,8 @@ func TestRegisterAndExchange_SPAKE2PayloadTooShort(t *testing.T) {
 	}
 
 	select {
-	case <-resultCh:
-		// Should either timeout or return error; both are acceptable
+	case err := <-resultCh:
+		_ = err // either a terminal error or the timeout path is acceptable
 	case <-time.After(5 * time.Second):
 		cancel()
 	}
@@ -189,8 +189,8 @@ func TestRegisterAndExchange_ConfirmBeforeSPAKE2(t *testing.T) {
 	}
 
 	select {
-	case <-resultCh:
-		// Should timeout or error; the confirm-before-spake2 should be ignored
+	case err := <-resultCh:
+		_ = err // either a terminal error or the timeout path is acceptable
 	case <-time.After(5 * time.Second):
 		cancel()
 	}
@@ -254,8 +254,8 @@ func TestRegisterAndExchange_ConfirmPayloadTooShort(t *testing.T) {
 	}
 
 	select {
-	case <-resultCh:
-		// Should timeout; confirm too short should be silently dropped
+	case err := <-resultCh:
+		_ = err // either a terminal error or the timeout path is acceptable
 	case <-time.After(5 * time.Second):
 		cancel()
 	}

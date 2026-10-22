@@ -25,7 +25,7 @@ const (
 	defaultListenAddr = ":9009"
 )
 
-var version = "0.2.3"
+var version = "0.2.4"
 var debug bool
 
 func main() {

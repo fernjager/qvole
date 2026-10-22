@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] - 2026-10-21
+
+### Security
+- Update `github.com/quic-go/quic-go` to v0.64.1, `golang.org/x/net` to v0.61.0, and `golang.org/x/crypto` to v0.58.0.
+- Build and test with Go 1.27.3, which includes the Go 1.27.2 and 1.27.3 security fixes.
+
+### Changed
+- Update `golang.org/x/sys` to v0.49.0 and `golangci-lint` to v2.15.0; pin CI and container builds to Go 1.27.3.
+
 ## [0.2.3] - 2026-09-20
 
 ### Security

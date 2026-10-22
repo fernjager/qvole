@@ -81,7 +81,7 @@ predate the checksum file install with a warning.
 git clone https://github.com/fernjager/qvole && cd qvole && make && sudo make install
 ```
 
-(Requires Go 1.27+)
+(Requires Go 1.27.3+)
 
 ---
 

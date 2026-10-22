@@ -403,7 +403,9 @@ func TestIsRateLimited_Concurrent(t *testing.T) {
 		}()
 	}
 	for i := 0; i < 10; i++ {
-		<-errs
+		if err := <-errs; err != nil {
+			t.Errorf("rate limiter worker: %v", err)
+		}
 	}
 	mu.Lock()
 	limited := isMsgRateLimited(info)

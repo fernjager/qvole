@@ -205,7 +205,9 @@ func TestRunExecCommand_StderrNotOnStream(t *testing.T) {
 	var outBuf bytes.Buffer
 	io.Copy(&outBuf, stream)
 
-	<-execDone
+	if err := <-execDone; err != nil {
+		t.Fatalf("exec failed: %v", err)
+	}
 	if !strings.Contains(outBuf.String(), "stdout-msg") {
 		t.Fatalf("expected stdout output, got %q", outBuf.String())
 	}
