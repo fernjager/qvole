@@ -196,9 +196,11 @@ shared secret (32 bytes, zero-padded)
             └── bytes [32:64]  →   encKey       (AES-256-GCM key)
 ```
 
-The HKDF salt is `SHA-256(sortedPoints || marshal(N))`, where N is the
-domain-separated custom generator. This binds the session key to the
-specific SPAKE2 group and ensures domain separation between sessions.
+The HKDF salt is
+`SHA-256(sortedPoints || marshal(N) || "qvole-spake2-fingerprints" || sorted(myFingerprint, peerFingerprint))`,
+where N is the domain-separated custom generator. Binding both certificate
+fingerprints (in sorted order, so both peers agree) prevents an active relay
+from substituting the fingerprint field in the SPAKE2 payload.
 
 #### 2c. Server/Client Role Assignment
 
@@ -220,7 +222,10 @@ Each peer constructs a confirm payload:
  Offset  Size  Field
  ──────  ────  ─────
  0       16    Random nonce
- 16      32    HMAC-SHA256(confirmKey, sortedPoints || marshal(N) || peerFingerprint || nonce || "qvole-spake2-confirm")
+ 16      32    HMAC-SHA256(confirmKey, sortedPoints || marshal(N)
+                 || "qvole-spake2-confirm-sender" || senderFingerprint
+                 || "qvole-spake2-confirm-receiver" || receiverFingerprint
+                 || nonce || "qvole-spake2-confirm")
  48      12    AES-256-GCM nonce
  60      52    Encrypted (null-padded) peer UDP address
  112     16    AES-256-GCM auth tag
@@ -228,6 +233,11 @@ Each peer constructs a confirm payload:
  ──────  ────  ─────
  Total   160
 ```
+
+The sender fills in its own fingerprint as `senderFingerprint` and the peer's
+claimed fingerprint as `receiverFingerprint`; the verifier checks the opposite
+direction (`sender = peer`, `receiver = self`). This binds both TLS pins to the
+PAKE and rejects reflected payloads (identical fingerprints).
 
 Sent as `MSG <room> confirm <hex>\n` and retransmitted every 2 s for each
 received candidate point until a matching confirm is found from the peer.
@@ -324,7 +334,7 @@ Peer A (server)                           Peer B (client)
 - **Peer verification:** `InsecureSkipVerify: true` disables standard CA-chain
   validation. Instead, a custom callback compares `SHA-256(peer's DER cert)`
   against the fingerprint from SPAKE2 using constant-time comparison.
-- **ALPN:** `"qvole-v0.1"`.
+- **ALPN:** `"qvole-v0.2"`.
 - **Mutual auth:** Server requires client certificate; client sends its cert.
 - **No uni-directional streams:** `MaxIncomingUniStreams = -1` (quic-go
   clamps negative values to 0; a literal `0` would select the default of 100).
@@ -542,7 +552,10 @@ acknowledgements, and no delivery ordering. Peers retransmit to overcome loss
  Offset  Size  Field
  ──────  ────  ─────
  0       16    Random nonce
- 16      32    HMAC-SHA256(confirmKey, sortedPoints || marshal(N) || peerFingerprint || nonce || "qvole-spake2-confirm")
+ 16      32    HMAC-SHA256(confirmKey, sortedPoints || marshal(N)
+                 || "qvole-spake2-confirm-sender" || senderFingerprint
+                 || "qvole-spake2-confirm-receiver" || receiverFingerprint
+                 || nonce || "qvole-spake2-confirm")
  48      12    AES-256-GCM nonce
  60      52    Encrypted (null-padded) peer UDP address
  112     16    AES-256-GCM auth tag
@@ -638,7 +651,7 @@ Wire compatibility is gated **only** by the ALPN string, which is derived from
 the protocol version, not the software version. Peers negotiate the protocol
 version via TLS ALPN; the relay is unaware of versioning.
 
-**ALPN string:** `"qvole-v<MAJOR>.<MINOR>"` (e.g. `"qvole-v0.1"`).
+**ALPN string:** `"qvole-v<MAJOR>.<MINOR>"` (e.g. `"qvole-v0.2"`).
 
 The `ProtocolVersion` constant (`internal/engine/transport.go`) is
 hand-maintained and bumped **only** when the wire format changes: SPAKE2 layout,
@@ -718,6 +731,6 @@ use a command that writes before it reads (most do); avoid `cat` and a bare
 A real fix writes a small application-level header immediately after
 `OpenStreamSync`, as the tunnel data stream already does, and strips it on read.
 Because pipe and exec are currently wire-compatible with `0.1.x` peers over
-ALPN `qvole-v0.1` (section 6), adding a header is wire-breaking and requires
+ALPN `qvole-v0.2` (section 6), adding a header is wire-breaking and requires
 either a protocol version bump or an explicit capability negotiated during the
 handshake.

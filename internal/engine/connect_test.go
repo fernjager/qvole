@@ -21,6 +21,13 @@ var testFingerprint = []byte{
 	0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89,
 }
 
+var testFingerprintB = []byte{
+	0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE,
+	0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE,
+	0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE,
+	0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE,
+}
+
 func TestDetectOutboundAddr_SpecificIP(t *testing.T) {
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
@@ -111,7 +118,7 @@ func TestRegisterAndExchange_SPAKE2PayloadTooShort(t *testing.T) {
 	// Start registerAndExchange in background; it will send REG and SPAKE2
 	resultCh := make(chan error, 1)
 	go func() {
-		_, _, _, err := registerAndExchange(ctx, udpConn, "testroom1", "test-code-for-spake2", []byte("fingerprint"), PeerConfig{})
+		_, _, _, err := registerAndExchange(ctx, udpConn, "testroom1", "test-code-for-spake2", testFingerprint, PeerConfig{})
 		resultCh <- err
 	}()
 
@@ -163,7 +170,7 @@ func TestRegisterAndExchange_ConfirmBeforeSPAKE2(t *testing.T) {
 
 	resultCh := make(chan error, 1)
 	go func() {
-		_, _, _, err := registerAndExchange(ctx, udpConn, "testroom2", "test-code-for-spake2", []byte("fingerprint"), PeerConfig{})
+		_, _, _, err := registerAndExchange(ctx, udpConn, "testroom2", "test-code-for-spake2", testFingerprint, PeerConfig{})
 		resultCh <- err
 	}()
 
@@ -214,7 +221,7 @@ func TestRegisterAndExchange_ConfirmPayloadTooShort(t *testing.T) {
 
 	resultCh := make(chan error, 1)
 	go func() {
-		_, _, _, err := registerAndExchange(ctx, udpConn, "testroom3", "test-code-for-spake2", []byte("fingerprint"), PeerConfig{})
+		_, _, _, err := registerAndExchange(ctx, udpConn, "testroom3", "test-code-for-spake2", testFingerprint, PeerConfig{})
 		resultCh <- err
 	}()
 
@@ -385,7 +392,7 @@ func TestRegisterAndExchange_NonTimeoutNetError(t *testing.T) {
 
 	resultCh := make(chan error, 1)
 	go func() {
-		_, _, _, err := registerAndExchange(ctx, udpConn, "testroom-neterr", "test-code-neterr-test", []byte("fingerprint"), PeerConfig{})
+		_, _, _, err := registerAndExchange(ctx, udpConn, "testroom-neterr", "test-code-neterr-test", testFingerprint, PeerConfig{})
 		resultCh <- err
 	}()
 
@@ -456,7 +463,7 @@ func setupSPAKE2Session(t *testing.T, password string) (confirmKey, encKey, myPo
 	}
 	myState.Destroy()
 
-	ck, ek, err := spake2.DeriveSessionKey(shared, myPoint, peerPoint)
+	ck, ek, err := spake2.DeriveSessionKey(shared, myPoint, peerPoint, testFingerprint, testFingerprintB)
 	spake2.ZeroBytes(shared)
 	if err != nil {
 		t.Fatalf("derive key: %v", err)
@@ -475,7 +482,7 @@ func TestProcessSpakeMsg_TooShort(t *testing.T) {
 	myPointN := state.BlindedBytesN()
 
 	shortHex := hex.EncodeToString(make([]byte, 30))
-	_, _, _, _, _, _, err = processSpakeMsg(shortHex, state, myPointM, myPointN)
+	_, _, _, _, _, _, err = processSpakeMsg(shortHex, state, myPointM, myPointN, testFingerprint)
 	if err == nil {
 		t.Fatal("expected error for too-short payload")
 	}
@@ -489,7 +496,7 @@ func TestProcessSpakeMsg_InvalidHex(t *testing.T) {
 	myPointM := state.BlindedBytesM()
 	myPointN := state.BlindedBytesN()
 
-	_, _, _, _, _, _, err = processSpakeMsg("not-a-valid-hex-string!", state, myPointM, myPointN)
+	_, _, _, _, _, _, err = processSpakeMsg("not-a-valid-hex-string!", state, myPointM, myPointN, testFingerprint)
 	if err == nil {
 		t.Fatal("expected error for invalid hex")
 	}
@@ -520,7 +527,7 @@ func TestProcessSpakeMsg_Success(t *testing.T) {
 	payload = append(payload, peerFingerprint...)
 	hexBody := hex.EncodeToString(payload)
 
-	effMyPoint, effPeerPoint, fp, isServer, ck, ek, err := processSpakeMsg(hexBody, myState, myPointM, myPointN)
+	effMyPoint, effPeerPoint, fp, isServer, ck, ek, err := processSpakeMsg(hexBody, myState, myPointM, myPointN, testFingerprint)
 	if err != nil {
 		t.Fatalf("processSpakeMsg: %v", err)
 	}
@@ -567,7 +574,7 @@ func TestProcessSpakeMsg_ReflectedPoint(t *testing.T) {
 	payload = append(payload, peerFingerprint...)
 	hexBody := hex.EncodeToString(payload)
 
-	_, _, _, _, _, _, err = processSpakeMsg(hexBody, myState, myPointM, myPointN)
+	_, _, _, _, _, _, err = processSpakeMsg(hexBody, myState, myPointM, myPointN, testFingerprint)
 	if err == nil {
 		t.Fatal("expected error for reflected point, got nil")
 	}
@@ -579,7 +586,7 @@ func TestBuildConfirmPayload_Size(t *testing.T) {
 	ck, ek, myPoint, peerPoint := setupSPAKE2Session(t, "test-confirm-size")
 	myAddr := []byte("10.0.0.1:8080")
 
-	payload, err := buildConfirmPayload(ck, ek, myPoint, peerPoint, testFingerprint, myAddr)
+	payload, err := buildConfirmPayload(ck, ek, myPoint, peerPoint, testFingerprint, testFingerprintB, myAddr)
 	if err != nil {
 		t.Fatalf("buildConfirmPayload: %v", err)
 	}
@@ -592,11 +599,11 @@ func TestBuildConfirmPayload_NonceRandom(t *testing.T) {
 	ck, ek, myPoint, peerPoint := setupSPAKE2Session(t, "test-nonce-random")
 	myAddr := []byte("10.0.0.1:8080")
 
-	payload1, err := buildConfirmPayload(ck, ek, myPoint, peerPoint, testFingerprint, myAddr)
+	payload1, err := buildConfirmPayload(ck, ek, myPoint, peerPoint, testFingerprint, testFingerprintB, myAddr)
 	if err != nil {
 		t.Fatalf("first call: %v", err)
 	}
-	payload2, err := buildConfirmPayload(ck, ek, myPoint, peerPoint, testFingerprint, myAddr)
+	payload2, err := buildConfirmPayload(ck, ek, myPoint, peerPoint, testFingerprint, testFingerprintB, myAddr)
 	if err != nil {
 		t.Fatalf("second call: %v", err)
 	}
@@ -612,14 +619,14 @@ func TestBuildConfirmPayload_NonceRandom(t *testing.T) {
 
 func TestProcessConfirmMsg_TooShort(t *testing.T) {
 	shortHex := hex.EncodeToString(make([]byte, 64))
-	_, err := processConfirmMsg(shortHex, nil, nil, nil, nil, nil)
+	_, err := processConfirmMsg(shortHex, nil, nil, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error for too-short confirm payload")
 	}
 }
 
 func TestProcessConfirmMsg_InvalidHex(t *testing.T) {
-	_, err := processConfirmMsg("not-hex!!!", nil, nil, nil, nil, nil)
+	_, err := processConfirmMsg("not-hex!!!", nil, nil, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error for invalid hex")
 	}
@@ -629,7 +636,7 @@ func TestProcessConfirmMsg_WrongKey(t *testing.T) {
 	ck, ek, myPoint, peerPoint := setupSPAKE2Session(t, "test-wrong-confirm")
 	myAddr := []byte("10.0.0.1:8080")
 
-	payload, err := buildConfirmPayload(ck, ek, myPoint, peerPoint, testFingerprint, myAddr)
+	payload, err := buildConfirmPayload(ck, ek, myPoint, peerPoint, testFingerprint, testFingerprintB, myAddr)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -640,7 +647,7 @@ func TestProcessConfirmMsg_WrongKey(t *testing.T) {
 		t.Fatalf("rand: %v", err)
 	}
 
-	_, err = processConfirmMsg(hexPayload, wrongKey, ek, myPoint, peerPoint, testFingerprint)
+	_, err = processConfirmMsg(hexPayload, wrongKey, ek, myPoint, peerPoint, testFingerprintB, testFingerprint)
 	if err == nil {
 		t.Fatal("expected error with wrong confirm key")
 	}
@@ -653,7 +660,7 @@ func TestBuildConfirmPayload_AddressTooLong(t *testing.T) {
 	ck, ek, myPoint, peerPoint := setupSPAKE2Session(t, "test-addr-too-long")
 	myAddr := []byte(strings.Repeat("x", MaxMetadataSize+1))
 
-	_, err := buildConfirmPayload(ck, ek, myPoint, peerPoint, testFingerprint, myAddr)
+	_, err := buildConfirmPayload(ck, ek, myPoint, peerPoint, testFingerprint, testFingerprintB, myAddr)
 	if err == nil {
 		t.Fatal("expected error for address exceeding MaxMetadataSize")
 	}
@@ -666,13 +673,13 @@ func TestProcessConfirmMsg_RoundTrip(t *testing.T) {
 	ck, ek, myPoint, peerPoint := setupSPAKE2Session(t, "test-confirm-roundtrip")
 	myAddr := []byte("10.0.0.1:8080")
 
-	payload, err := buildConfirmPayload(ck, ek, myPoint, peerPoint, testFingerprint, myAddr)
+	payload, err := buildConfirmPayload(ck, ek, myPoint, peerPoint, testFingerprint, testFingerprintB, myAddr)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
 	hexPayload := hex.EncodeToString(payload)
 
-	peerAddr, err := processConfirmMsg(hexPayload, ck, ek, myPoint, peerPoint, testFingerprint)
+	peerAddr, err := processConfirmMsg(hexPayload, ck, ek, myPoint, peerPoint, testFingerprintB, testFingerprint)
 	if err != nil {
 		t.Fatalf("processConfirmMsg: %v", err)
 	}

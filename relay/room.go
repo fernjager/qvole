@@ -26,6 +26,11 @@ const (
 	defaultRegTTL             = 1 * time.Minute
 	defaultRelayWorkers       = 4
 	defaultMaxClientsHard     = 20
+	// defaultMaxClientsPerPrefixPerRoom stops one source (or one IPv6 /64)
+	// from filling a room's hard cap on its own. Four leaves headroom for
+	// restarts/stale source ports while still preventing a single host from
+	// occupying all 20 slots.
+	defaultMaxClientsPerPrefixPerRoom = 4
 
 	// maxPendingPerIP caps the number of pending (pre-cookie) registrations
 	// allowed per source IP across all rooms. This prevents a single IP from
@@ -39,6 +44,12 @@ const (
 	// not to the flood rate times the TTL.
 	defaultMaxPendingGlobal = 65536
 
+	// In-room pending registrations have their own budget and a per-room cap.
+	// Sharing maxPendingGlobal with the global store let a flood against one
+	// existing room freeze new-room registration relay-wide.
+	defaultMaxInRoomPendingGlobal = 65536
+	defaultMaxPendingPerRoom      = 256
+
 	// maxRegShardEntries is a hard cap on rate-limit map entries per
 	// shard. Under a source-IP flood, entries accumulate fast; this cap
 	// prevents unbounded memory growth.
@@ -47,17 +58,20 @@ const (
 )
 
 var (
-	maxRooms           int           = defaultMaxRooms
-	maxRoomsPerIP      int           = defaultMaxRoomsPerIP
-	maxMsgRate         int           = defaultMaxMsgRate
-	maxRegRate         int           = defaultRegRate
-	rateWindow         time.Duration = defaultRateWindow
-	regCleanupInterval time.Duration = defaultRegCleanupInterval
-	regTTL             time.Duration = defaultRegTTL
-	relayWorkers       int           = defaultRelayWorkers
-	maxClientsHard     int           = defaultMaxClientsHard
-	maxPendingPerIP    int           = defaultMaxPendingPerIP
-	maxPendingGlobal   int           = defaultMaxPendingGlobal
+	maxRooms                   int           = defaultMaxRooms
+	maxRoomsPerIP              int           = defaultMaxRoomsPerIP
+	maxMsgRate                 int           = defaultMaxMsgRate
+	maxRegRate                 int           = defaultRegRate
+	rateWindow                 time.Duration = defaultRateWindow
+	regCleanupInterval         time.Duration = defaultRegCleanupInterval
+	regTTL                     time.Duration = defaultRegTTL
+	relayWorkers               int           = defaultRelayWorkers
+	maxClientsHard             int           = defaultMaxClientsHard
+	maxClientsPerPrefixPerRoom int           = defaultMaxClientsPerPrefixPerRoom
+	maxPendingPerIP            int           = defaultMaxPendingPerIP
+	maxPendingGlobal           int           = defaultMaxPendingGlobal
+	maxInRoomPending           int           = defaultMaxInRoomPendingGlobal
+	maxPendingPerRoom          int           = defaultMaxPendingPerRoom
 )
 
 type rateLimiter struct {
@@ -93,6 +107,11 @@ type roomEntry struct {
 	pending     map[string]*pendingReg // cookie challenge, keyed by srcStr
 	pendingByIP map[string]int         // per-IP count of pending, mirrors pending
 	t           time.Time
+	// nextPendingSweep throttles expiry scans of pending. Without it, every
+	// REG would scan the whole map while holding entry.mu; an attacker who
+	// fills the map (up to the global budget) could turn each REG into O(n)
+	// work and stall the room.
+	nextPendingSweep time.Time
 }
 
 // pendingReg holds a return-routability cookie for a client that sent REG
@@ -143,6 +162,12 @@ var (
 	pendingRegs     [numShards]pendingStoreShard
 	pendingIPCounts [numShards]pendingIPShard
 	pendingTotal    atomic.Int64
+	// inRoomPendingTotal counts pending registrations held in per-room
+	// roomEntry.pending maps. They have their own relay-wide budget and a
+	// per-room cap, separate from the pre-cookie store used for rooms that do
+	// not exist yet. A flood against one existing room cannot freeze new-room
+	// registration, and memory stays bounded.
+	inRoomPendingTotal atomic.Int64
 
 	statRegs  atomic.Int64
 	statMsgs  atomic.Int64
@@ -151,22 +176,58 @@ var (
 	dropLogLimiter = new(ipRateLimiter)
 )
 
+// Bounds for the drop-log rate limiter. The per-IP interval alone is not
+// enough: a spoofed-source or IPv6-prefix flood can present an unlimited
+// number of distinct source IPs, each of which would otherwise allocate a map
+// entry and emit one log line. A global lines-per-second budget plus a hard
+// map cap keeps memory and log volume bounded.
+var (
+	maxDropLogEntries    = 100_000
+	maxDropLogsPerSecond = 100
+)
+
 type ipRateLimiter struct {
-	mu   sync.Mutex
-	last map[string]time.Time
+	mu          sync.Mutex
+	last        map[string]time.Time
+	windowStart time.Time
+	windowCount int
+	// Optional per-instance overrides (used by tests); zero means use the
+	// package defaults. Keeping them out of package globals avoids racing the
+	// production limiter.
+	maxEntries int
+	maxPerSec  int
 }
 
 func (l *ipRateLimiter) allow(ip string, interval time.Duration) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	perSec := l.maxPerSec
+	if perSec <= 0 {
+		perSec = maxDropLogsPerSecond
+	}
+	maxEntries := l.maxEntries
+	if maxEntries <= 0 {
+		maxEntries = maxDropLogEntries
+	}
 	now := time.Now()
+	if now.Sub(l.windowStart) >= time.Second {
+		l.windowStart = now
+		l.windowCount = 0
+	}
+	if l.windowCount >= perSec {
+		return false
+	}
 	if last, ok := l.last[ip]; ok && now.Sub(last) < interval {
 		return false
 	}
 	if l.last == nil {
 		l.last = make(map[string]time.Time)
 	}
+	if _, ok := l.last[ip]; !ok && len(l.last) >= maxEntries {
+		return false
+	}
 	l.last[ip] = now
+	l.windowCount++
 	return true
 }
 
@@ -185,10 +246,13 @@ func init() {
 	maxRooms = util.EnvInt("QVOLE_RELAY_MAX_ROOMS", defaultMaxRooms)
 	maxRoomsPerIP = util.EnvInt("QVOLE_RELAY_MAX_ROOMS_PER_IP", defaultMaxRoomsPerIP)
 	maxClientsHard = util.EnvInt("QVOLE_RELAY_MAX_CLIENTS_HARD", defaultMaxClientsHard)
+	maxClientsPerPrefixPerRoom = util.EnvInt("QVOLE_RELAY_MAX_CLIENTS_PER_PREFIX_PER_ROOM", defaultMaxClientsPerPrefixPerRoom)
 	maxMsgRate = util.EnvInt("QVOLE_RELAY_MSG_RATE", defaultMaxMsgRate)
 	maxRegRate = util.EnvInt("QVOLE_RELAY_REG_RATE", defaultRegRate)
 	maxPendingPerIP = util.EnvInt("QVOLE_RELAY_MAX_PENDING_PER_IP", defaultMaxPendingPerIP)
 	maxPendingGlobal = util.EnvInt("QVOLE_RELAY_MAX_PENDING", defaultMaxPendingGlobal)
+	maxInRoomPending = util.EnvInt("QVOLE_RELAY_MAX_INROOM_PENDING", defaultMaxInRoomPendingGlobal)
+	maxPendingPerRoom = util.EnvInt("QVOLE_RELAY_MAX_PENDING_PER_ROOM", defaultMaxPendingPerRoom)
 	rateWindow = util.EnvDuration("QVOLE_RELAY_RATE_WINDOW_MS", defaultRateWindow)
 	regCleanupInterval = util.EnvDuration("QVOLE_RELAY_CLEANUP_INTERVAL_MS", defaultRegCleanupInterval)
 	regTTL = util.EnvDuration("QVOLE_RELAY_TTL_MS", defaultRegTTL)
@@ -235,10 +299,15 @@ func ipKey(src string) string {
 	}
 	// Canonicalize the address so textual variants of the same IP
 	// (e.g., "2001:db8::1" vs "2001:db8:0:0:0:0:0:1" vs "::ffff:1.2.3.4"
-	// vs "1.2.3.4") collapse to a single key. Otherwise per-IP limits can
-	// be bypassed trivially from an IPv6 /64.
+	// vs "1.2.3.4") collapse to a single key. For IPv6, normalize to the /64
+	// prefix: a single host normally controls an entire /64 and could
+	// otherwise rotate addresses to bypass every per-IP cap. Loopback stays
+	// exact because local tests use 127.0.0.1 and ::1 directly.
 	if ip := net.ParseIP(host); ip != nil {
-		return ip.String()
+		if ip.To4() != nil || ip.IsLoopback() {
+			return ip.String()
+		}
+		return ip.Mask(net.CIDRMask(64, 128)).String()
 	}
 	return host
 }
@@ -376,6 +445,9 @@ func resetRooms() {
 	}
 	totalRoomCount.Store(0)
 	resetPendingRegs()
+	// All room entries were dropped above, so their pending entries are gone
+	// with them.
+	inRoomPendingTotal.Store(0)
 }
 
 func countIPRooms(ip string) int {
@@ -403,21 +475,62 @@ func addPendingIP(ip string, delta int) {
 	pendingTotal.Add(int64(delta))
 }
 
+// globalPendingBudgetReached reports whether the pre-cookie store for
+// non-existent rooms is full. It deliberately excludes in-room pending: a
+// flood against one existing room must not prevent new rooms from being
+// registered.
+func globalPendingBudgetReached() bool {
+	return pendingTotal.Load() >= int64(maxPendingGlobal)
+}
+
+// inRoomPendingBudgetReached reports whether the separate relay-wide budget for
+// pending entries in existing rooms is full.
+func inRoomPendingBudgetReached() bool {
+	return inRoomPendingTotal.Load() >= int64(maxInRoomPending)
+}
+
+// adjustInRoomPending atomically adds delta to inRoomPendingTotal, clamping at
+// zero so test resets (which clear the maps without walking every room) cannot
+// drive the in-room budget negative.
+func adjustInRoomPending(delta int64) {
+	for {
+		old := inRoomPendingTotal.Load()
+		n := old + delta
+		if n < 0 {
+			n = 0
+		}
+		if inRoomPendingTotal.CompareAndSwap(old, n) {
+			return
+		}
+	}
+}
+
 // storePendingReg inserts p, returning false when the global pending cap has
 // been reached. Re-storing an existing (room, src) key replaces it without
 // changing the counts.
 func storePendingReg(room, srcStr string, p *pendingReg) bool {
 	sh := pendingShardFor(room)
 	sh.mu.Lock()
-	if sh.regs[room] == nil {
-		sh.regs[room] = make(map[string]*pendingReg)
+	rm := sh.regs[room]
+	var existed bool
+	if rm != nil {
+		_, existed = rm[srcStr]
 	}
-	_, existed := sh.regs[room][srcStr]
-	if !existed && int(pendingTotal.Load()) >= maxPendingGlobal {
+	// Check the budget before allocating an inner map: after the cap is hit,
+	// an attacker can otherwise send REGs with fresh room names and make every
+	// rejected attempt allocate an empty map that survives until cleanup.
+	if !existed && globalPendingBudgetReached() {
+		if rm != nil && len(rm) == 0 {
+			delete(sh.regs, room)
+		}
 		sh.mu.Unlock()
 		return false
 	}
-	sh.regs[room][srcStr] = p
+	if rm == nil {
+		rm = make(map[string]*pendingReg)
+		sh.regs[room] = rm
+	}
+	rm[srcStr] = p
 	sh.mu.Unlock()
 	if !existed {
 		addPendingIP(ipKey(srcStr), 1)
@@ -503,21 +616,29 @@ func resetPendingRegs() {
 		sh.mu.Unlock()
 	}
 	pendingTotal.Store(0)
+	inRoomPendingTotal.Store(0)
 }
 
 // addPending records an in-room pending registration and its per-IP count.
-// Must be called with entry.mu held.
-func (entry *roomEntry) addPending(srcStr, ip string, p *pendingReg) {
-	if entry.pending == nil {
-		entry.pending = make(map[string]*pendingReg)
-	}
+// Must be called with entry.mu held. It returns false when the per-room cap or
+// the relay-wide in-room budget is exhausted, in which case the caller must
+// reject the REG instead of growing the map without bound.
+func (entry *roomEntry) addPending(srcStr, ip string, p *pendingReg) bool {
 	if _, exists := entry.pending[srcStr]; !exists {
+		if len(entry.pending) >= maxPendingPerRoom || inRoomPendingBudgetReached() {
+			return false
+		}
+		if entry.pending == nil {
+			entry.pending = make(map[string]*pendingReg)
+		}
 		if entry.pendingByIP == nil {
 			entry.pendingByIP = make(map[string]int)
 		}
 		entry.pendingByIP[ip]++
+		adjustInRoomPending(1)
 	}
 	entry.pending[srcStr] = p
+	return true
 }
 
 // removePending deletes an in-room pending registration and its per-IP count.
@@ -527,6 +648,7 @@ func (entry *roomEntry) removePending(srcStr string) {
 		return
 	}
 	delete(entry.pending, srcStr)
+	adjustInRoomPending(-1)
 	if entry.pendingByIP != nil {
 		ip := ipKey(srcStr)
 		if n := entry.pendingByIP[ip]; n <= 1 {
@@ -537,10 +659,36 @@ func (entry *roomEntry) removePending(srcStr string) {
 	}
 }
 
+// removeAllPending drops every in-room pending registration and returns their
+// budget. It must be called with entry.mu held when the room is being deleted,
+// so pending entries that are still within their TTL do not leak the shared
+// budget.
+func (entry *roomEntry) removeAllPending() {
+	n := len(entry.pending)
+	entry.pending = nil
+	entry.pendingByIP = nil
+	if n > 0 {
+		adjustInRoomPending(-int64(n))
+	}
+}
+
 // pendingCountForIP returns the number of pending registrations for the given
 // IP within this room entry. Must be called with entry.mu held.
 func (entry *roomEntry) pendingCountForIP(ip string) int {
 	return entry.pendingByIP[ip]
+}
+
+// countPrefixClients returns how many admitted clients in this room belong to
+// the same source prefix (an exact IPv4 address or an IPv6 /64, per ipKey).
+// Must be called with entry.mu held.
+func (entry *roomEntry) countPrefixClients(prefix string) int {
+	n := 0
+	for addr := range entry.udpClients {
+		if ipKey(addr) == prefix {
+			n++
+		}
+	}
+	return n
 }
 
 func (entry *roomEntry) removeStaleClients(room string, now time.Time) {
@@ -560,18 +708,33 @@ func (entry *roomEntry) removeStaleClients(room string, now time.Time) {
 			delete(entry.udpClients, addr)
 		}
 	}
-	// Evict expired pending registrations, keeping the per-IP counts in sync.
+}
+
+// removeStalePending evicts expired in-room pending registrations, keeping the
+// per-IP counts and the in-room pending budget in sync. It is O(len(pending)),
+// so callers on the hot REG path should use sweep (throttled) instead.
+func (entry *roomEntry) removeStalePending(now time.Time) {
 	for addr, pend := range entry.pending {
 		if now.Sub(pend.createdAt) > pendingRegTTL {
 			entry.removePending(addr)
 		}
 	}
-	// Drop the maps entirely if empty.
 	if len(entry.pending) == 0 {
 		entry.pending = nil
 	}
 	if len(entry.pendingByIP) == 0 {
 		entry.pendingByIP = nil
+	}
+	entry.nextPendingSweep = now.Add(pendingRegTTL)
+}
+
+// sweep performs the per-REG stale bookkeeping. Client expiry is cheap (the
+// room is capped at maxClientsHard); pending expiry is throttled to once per
+// pendingRegTTL so a large pending map cannot make every REG O(n).
+func (entry *roomEntry) sweep(room string, now time.Time) {
+	entry.removeStaleClients(room, now)
+	if !now.Before(entry.nextPendingSweep) {
+		entry.removeStalePending(now)
 	}
 }
 
@@ -581,8 +744,14 @@ func evictStaleRooms(shard *roomShard) int {
 	for room, entry := range shard.rooms {
 		entry.mu.Lock()
 		entry.removeStaleClients(room, now)
+		entry.removeStalePending(now)
 		empty := len(entry.udpClients) == 0
 		stale := now.Sub(entry.t) > regTTL
+		if empty && stale {
+			// Drop any still-fresh pending entries too, otherwise their
+			// shared-budget accounting would leak when the room disappears.
+			entry.removeAllPending()
+		}
 		entry.mu.Unlock()
 		if empty && stale {
 			delete(shard.rooms, room)

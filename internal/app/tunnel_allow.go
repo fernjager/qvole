@@ -32,6 +32,10 @@ type TunnelAllow struct {
 	// Resolve() so the dial path can pin to allowed IPs without re-resolving
 	// the allowlist on every connection. A nil ip means the ':port' wildcard.
 	forwardRules []ipRule
+	// resolved records that Resolve ran. It keeps matchForwardIPs from
+	// re-resolving an entry that failed at startup (which would violate the
+	// documented fail-closed behavior).
+	resolved bool
 }
 
 // ipRule is one resolution-aware -aF entry. Nil ip (with a non-empty port)
@@ -74,6 +78,7 @@ func (a TunnelAllow) Validate() error {
 // literals and ':port' wildcards are kept as-is. Call after Validate.
 func (a *TunnelAllow) Resolve() {
 	a.forwardRules = buildForwardRules(a.Forward)
+	a.resolved = true
 }
 
 // AllowsListen reports whether the peer may ask this side to listen on addr.

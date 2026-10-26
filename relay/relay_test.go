@@ -726,3 +726,15 @@ func TestHandlePacket_ConcurrentRegAndMsg(t *testing.T) {
 		t.Fatal("expected at least some messages from concurrent processing")
 	}
 }
+
+func TestIPKey_AggregatesIPv6Per64(t *testing.T) {
+	a := ipKey("[2001:db8:1:2::1]:1000")
+	b := ipKey("[2001:db8:1:2::ffff]:2000")
+	if a != b {
+		t.Fatalf("addresses in the same /64 produced different keys: %q vs %q", a, b)
+	}
+	c := ipKey("[2001:db8:1:3::1]:1000")
+	if a == c {
+		t.Fatalf("addresses in different /64s collapsed to the same key %q", a)
+	}
+}

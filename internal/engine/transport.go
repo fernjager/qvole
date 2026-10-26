@@ -15,7 +15,10 @@ import (
 )
 
 const (
-	ProtocolVersion                       = "0.1"
+	// Protocol 0.2 binds both peers' certificate fingerprints into the
+	// SPAKE2 session key and confirm HMAC. It is intentionally wire-breaking:
+	// 0.1 peers must not be allowed to negotiate the vulnerable handshake.
+	ProtocolVersion                       = "0.2"
 	defaultKeepAlivePeriod                = 5 * time.Second
 	defaultMaxIdleTimeout                 = 2 * time.Minute
 	defaultHandshakeIdleTimeout           = 30 * time.Second
@@ -29,10 +32,16 @@ const (
 
 func baseTLSConfig(cert tls.Certificate, peerFingerprint []byte, clientAuth tls.ClientAuthType) *tls.Config {
 	return &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		Certificates:       []tls.Certificate{cert},
-		InsecureSkipVerify: true,
-		ClientAuth:         clientAuth,
+		MinVersion: tls.VersionTLS13,
+		// VerifyPeerCertificate is not invoked for resumed TLS sessions, so a
+		// session ticket could bypass the pinned-fingerprint check if a config
+		// were ever reused (or a caller supplied a ClientSessionCache). qvole
+		// creates a fresh config and ephemeral certificates per connection and
+		// has no use for resumption, so disable tickets outright.
+		SessionTicketsDisabled: true,
+		Certificates:           []tls.Certificate{cert},
+		InsecureSkipVerify:     true,
+		ClientAuth:             clientAuth,
 		VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 			if len(rawCerts) == 0 {
 				return fmt.Errorf("no peer certificate")

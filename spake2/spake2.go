@@ -1,6 +1,7 @@
 package spake2
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/elliptic"
@@ -353,8 +354,25 @@ func aadWithGenerators(myPoint, peerPoint []byte) []byte {
 
 // DeriveSessionKey derives a 32-byte confirm HMAC key and a 32-byte AES-256-GCM
 // encryption key from the SPAKE2 shared secret using HKDF.
-func DeriveSessionKey(sharedSecret, myPoint, peerPoint []byte) (confirmKey, encKey []byte, err error) {
+//
+// Both peers' certificate fingerprints are bound into the HKDF salt (in sorted
+// order, so both sides agree). Without this, the SPAKE2 payload's fingerprint
+// field would be unauthenticated and an active relay could substitute it.
+func DeriveSessionKey(sharedSecret, myPoint, peerPoint, myFingerprint, peerFingerprint []byte) (confirmKey, encKey []byte, err error) {
+	if len(myFingerprint) != sha256.Size || len(peerFingerprint) != sha256.Size {
+		return nil, nil, fmt.Errorf("spake2: certificate fingerprints must be %d bytes", sha256.Size)
+	}
+	if bytes.Equal(myFingerprint, peerFingerprint) {
+		return nil, nil, fmt.Errorf("spake2: reflected certificate fingerprint")
+	}
 	aad := aadWithGenerators(myPoint, peerPoint)
+	fpA, fpB := myFingerprint, peerFingerprint
+	if bytes.Compare(fpA, fpB) > 0 {
+		fpA, fpB = fpB, fpA
+	}
+	aad = append(aad, []byte("qvole-spake2-fingerprints")...)
+	aad = append(aad, fpA...)
+	aad = append(aad, fpB...)
 	salt := sha256.Sum256(aad)
 	reader := hkdf.New(sha256.New, sharedSecret, salt[:], []byte("qvole-spake2-session"))
 	key := make([]byte, 64) // 32 for confirm HMAC, 32 for AES-256-GCM
@@ -399,12 +417,25 @@ func DecryptMetadata(key, aad, ciphertext []byte) ([]byte, error) {
 	return gcm.Open(nil, nonce, actualCiphertext, aad)
 }
 
-// ComputeConfirm computes an HMAC-SHA-256 over the ordered public points,
-// the N generator, the peer's certificate fingerprint, a nonce, and a
-// domain separation string. Returns an error if nonce is empty.
-func ComputeConfirm(sessionKey, myPoint, peerPoint, nonce, peerFingerprint []byte) ([]byte, error) {
+// ComputeConfirm computes an HMAC-SHA-256 over the ordered public points, the N
+// generator, the sender's certificate fingerprint, the receiver's certificate
+// fingerprint, a nonce, and a domain separation string. Binding both
+// fingerprints (and their direction) is what authenticates the TLS pin: a
+// relay that substitutes a fingerprint in the SPAKE2 payload makes the HMAC
+// check fail.
+//
+// The sender calls it with (myFingerprint, peerFingerprint); a verifier calls
+// it with (peerFingerprint, myFingerprint), because it is checking the peer's
+// confirm.
+func ComputeConfirm(sessionKey, myPoint, peerPoint, nonce, senderFingerprint, receiverFingerprint []byte) ([]byte, error) {
 	if len(nonce) < 1 {
 		return nil, fmt.Errorf("spake2: confirm nonce must be non-empty")
+	}
+	if len(senderFingerprint) != sha256.Size || len(receiverFingerprint) != sha256.Size {
+		return nil, fmt.Errorf("spake2: certificate fingerprints must be %d bytes", sha256.Size)
+	}
+	if bytes.Equal(senderFingerprint, receiverFingerprint) {
+		return nil, fmt.Errorf("spake2: reflected certificate fingerprint")
 	}
 	mac := hmac.New(sha256.New, sessionKey)
 	a, b := myPoint, peerPoint
@@ -415,18 +446,23 @@ func ComputeConfirm(sessionKey, myPoint, peerPoint, nonce, peerFingerprint []byt
 	mac.Write(b)
 	genBytes := elliptic.Marshal(Curve, Nx, Ny)
 	mac.Write(genBytes)
-	mac.Write(peerFingerprint)
+	mac.Write([]byte("qvole-spake2-confirm-sender"))
+	mac.Write(senderFingerprint)
+	mac.Write([]byte("qvole-spake2-confirm-receiver"))
+	mac.Write(receiverFingerprint)
 	mac.Write(nonce)
 	mac.Write([]byte("qvole-spake2-confirm"))
 	return mac.Sum(nil), nil
 }
 
-// VerifyConfirm checks that peerConfirm matches the expected HMAC computed
-// with ComputeConfirm using constant-time comparison.
-// myFingerprint is the local certificate fingerprint (the one the peer used
-// when computing their confirm).
-func VerifyConfirm(sessionKey, myPoint, peerPoint, nonce, myFingerprint, peerConfirm []byte) bool {
-	expected, err := ComputeConfirm(sessionKey, myPoint, peerPoint, nonce, myFingerprint)
+// VerifyConfirm checks that peerConfirm matches the expected HMAC computed with
+// ComputeConfirm using constant-time comparison.
+//
+// myFingerprint is this side's certificate fingerprint and peerFingerprint is
+// the fingerprint claimed in the peer's SPAKE2 payload. The peer's confirm must
+// have been computed in the opposite direction: sender=peer, receiver=self.
+func VerifyConfirm(sessionKey, myPoint, peerPoint, nonce, myFingerprint, peerFingerprint, peerConfirm []byte) bool {
+	expected, err := ComputeConfirm(sessionKey, myPoint, peerPoint, nonce, peerFingerprint, myFingerprint)
 	if err != nil {
 		return false
 	}

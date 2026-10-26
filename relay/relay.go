@@ -208,7 +208,7 @@ func (r *relayServer) writeRelay(msg []byte, addr *net.UDPAddr) error {
 			r.conn.SetWriteDeadline(time.Now().Add(writeDeadline))
 			_, err := r.conn.WriteTo(msg, addr)
 			r.writeMu.Unlock()
-			if err != nil {
+			if err != nil && dropLogLimiter.allow(ipKey(addr.String()), dropLogInterval) {
 				util.LogRelay.PrintfWarn("UDP write to %s failed: %v", addr, err)
 			}
 		}()
@@ -255,6 +255,15 @@ func (r *relayServer) handleReg(room string, cookie []byte, src *net.UDPAddr) {
 	srcStr := src.String()
 	srcIP := ipKey(srcStr)
 
+	// Rate-limit every REG shape, including cookie-bearing completion and
+	// re-registration. Previously only the no-cookie/rechallenge paths were
+	// limited, so a random-cookie flood reached the pending/room locks and
+	// burned CPU without ever being admitted.
+	if isRegRateLimited(srcIP) {
+		dropPacket(src, "Rate-limited REG from %s", srcStr)
+		return
+	}
+
 	// If a cookie is present, this is the follow-up REG; verify it
 	// against the pending entry to prove return routability.
 	if len(cookie) > 0 {
@@ -273,6 +282,11 @@ func (r *relayServer) handleReg(room string, cookie []byte, src *net.UDPAddr) {
 		if pend := getPendingReg(room, srcStr); pend != nil {
 			if !bytes.Equal(pend.cookie, cookieBytes) {
 				dropPacket(src, "Dropped REG with mismatched cookie from %s in room %s (pending store)", srcStr, room)
+				return
+			}
+			if time.Since(pend.createdAt) > pendingRegTTL {
+				deletePendingReg(room, srcStr)
+				dropPacket(src, "Dropped expired cookie from %s in room %s (pending store)", srcStr, room)
 				return
 			}
 			// Cookie matches. Remove from pending store and admit the client,
@@ -325,8 +339,8 @@ func (r *relayServer) handleReg(room string, cookie []byte, src *net.UDPAddr) {
 				totalRoomCount.Add(1)
 				addIPRoom(srcIP, room)
 				statRegs.Add(1)
-				util.LogRelay.Printf("Client %s joined room %s (created)", srcStr, room)
 				shard.mu.Unlock()
+				util.LogRelay.Printf("Client %s joined room %s (created)", srcStr, room)
 				r.sendREGD(room, src)
 				return
 			}
@@ -340,7 +354,7 @@ func (r *relayServer) handleReg(room string, cookie []byte, src *net.UDPAddr) {
 			// Evict stale clients (and expired in-room pending entries) before
 			// the cap checks: an idle room's clients must not block a valid
 			// cookie completion until the next cleanup tick.
-			entry.removeStaleClients(room, time.Now())
+			entry.sweep(room, time.Now())
 			ipAlreadyInRoom := false
 			for addr := range entry.udpClients {
 				if ipKey(addr) == srcIP {
@@ -351,6 +365,11 @@ func (r *relayServer) handleReg(room string, cookie []byte, src *net.UDPAddr) {
 			if len(entry.udpClients) >= maxClientsHard && entry.udpClients[srcStr] == nil {
 				entry.mu.Unlock()
 				dropPacket(src, "Room %s at hard cap (%d), rejecting %s (cookie completion)", room, maxClientsHard, srcStr)
+				return
+			}
+			if entry.udpClients[srcStr] == nil && entry.countPrefixClients(srcIP) >= maxClientsPerPrefixPerRoom {
+				entry.mu.Unlock()
+				dropPacket(src, "Room %s per-prefix client limit (%d) reached for %s (cookie completion)", room, maxClientsPerPrefixPerRoom, srcStr)
 				return
 			}
 			if !ipAlreadyInRoom && countIPRooms(srcIP) >= maxRoomsPerIP {
@@ -369,8 +388,8 @@ func (r *relayServer) handleReg(room string, cookie []byte, src *net.UDPAddr) {
 				addIPRoom(srcIP, room)
 			}
 			statRegs.Add(1)
-			util.LogRelay.Printf("Client %s joined room %s (cookie completion)", srcStr, room)
 			entry.mu.Unlock()
+			util.LogRelay.Printf("Client %s joined room %s (cookie completion)", srcStr, room)
 			r.sendREGD(room, src)
 			return
 		}
@@ -390,10 +409,6 @@ func (r *relayServer) handleReg(room string, cookie []byte, src *net.UDPAddr) {
 			// whose handshake outlived the pending entry can still complete.
 			// No room is created here, so this can't be abused to inflate the
 			// room table; the same caps as an initial REG apply.
-			if isRegRateLimited(srcIP) {
-				dropPacket(src, "Rate-limited REG from %s", srcStr)
-				return
-			}
 			if countIPRooms(srcIP) >= maxRoomsPerIP {
 				dropPacket(src, "Room limit per IP reached for %s", srcStr)
 				return
@@ -426,11 +441,17 @@ func (r *relayServer) handleReg(room string, cookie []byte, src *net.UDPAddr) {
 			dropPacket(src, "Dropped REG with mismatched cookie from %s in room %s", srcStr, room)
 			return
 		}
+		if time.Since(pend.createdAt) > pendingRegTTL {
+			entry.removePending(srcStr)
+			entry.mu.Unlock()
+			dropPacket(src, "Dropped expired cookie from %s in room %s", srcStr, room)
+			return
+		}
 		// Cookie matches; admit the client, re-checking caps. Evict stale
 		// clients first so an idle room's clients do not count against the
 		// hard cap (pend was captured above, so this cannot invalidate the
 		// completion).
-		entry.removeStaleClients(room, time.Now())
+		entry.sweep(room, time.Now())
 		if len(entry.udpClients) >= maxClientsHard && entry.udpClients[srcStr] == nil {
 			entry.mu.Unlock()
 			dropPacket(src, "Room %s at hard cap (%d), rejecting %s (cookie admission)", room, maxClientsHard, srcStr)
@@ -473,24 +494,14 @@ func (r *relayServer) handleReg(room string, cookie []byte, src *net.UDPAddr) {
 			}
 		}
 		statRegs.Add(1)
-		util.LogRelay.Printf("Client %s joined room %s", srcStr, room)
 		entry.mu.Unlock()
+		util.LogRelay.Printf("Client %s joined room %s", srcStr, room)
 
 		r.sendREGD(room, src)
 		return
 	}
 
 	// No cookie: initial REG.
-	if isRegRateLimited(srcIP) {
-		dropPacket(src, "Rate-limited REG from %s", srcStr)
-		return
-	}
-
-	if countIPRooms(srcIP) >= maxRoomsPerIP {
-		dropPacket(src, "Room limit per IP reached for %s", srcStr)
-		return
-	}
-
 	shard := shardFor(room)
 
 	shard.mu.Lock()
@@ -500,6 +511,14 @@ func (r *relayServer) handleReg(room string, cookie []byte, src *net.UDPAddr) {
 		// creating the room immediately. This prevents room-table exhaustion
 		// from spoofed source IPs.
 		shard.mu.Unlock()
+
+		// Apply the per-prefix room cap only when creating a new room. An
+		// already-admitted client must still be able to re-REG a room it is
+		// already in, even if the prefix is at the cap.
+		if countIPRooms(srcIP) >= maxRoomsPerIP {
+			dropPacket(src, "Room limit per IP reached for %s", srcStr)
+			return
+		}
 
 		if countPendingForIP(srcIP) >= maxPendingPerIP {
 			dropPacket(src, "Pending limit per IP reached for %s", srcStr)
@@ -525,7 +544,7 @@ func (r *relayServer) handleReg(room string, cookie []byte, src *net.UDPAddr) {
 	entry.mu.Lock()
 	shard.mu.Unlock()
 
-	entry.removeStaleClients(room, time.Now())
+	entry.sweep(room, time.Now())
 
 	// Check hard cap. This counts admitted udpClients only; in-room pending
 	// registrations are bounded separately by the per-IP pending cap below.
@@ -542,6 +561,12 @@ func (r *relayServer) handleReg(room string, cookie []byte, src *net.UDPAddr) {
 		entry.mu.Unlock()
 		statRegs.Add(1)
 		r.sendREGD(room, src)
+		return
+	}
+
+	if entry.countPrefixClients(srcIP) >= maxClientsPerPrefixPerRoom {
+		entry.mu.Unlock()
+		dropPacket(src, "Room %s per-prefix client limit (%d) reached for %s", room, maxClientsPerPrefixPerRoom, srcStr)
 		return
 	}
 
@@ -570,7 +595,11 @@ func (r *relayServer) handleReg(room string, cookie []byte, src *net.UDPAddr) {
 		util.LogRelay.PrintfWarn("rand cookie failed: %v", err)
 		return
 	}
-	entry.addPending(srcStr, srcIP, &pendingReg{cookie: cb, createdAt: time.Now(), resolvedAddr: src})
+	if !entry.addPending(srcStr, srcIP, &pendingReg{cookie: cb, createdAt: time.Now(), resolvedAddr: src}) {
+		entry.mu.Unlock()
+		dropPacket(src, "Pending store full for %s in room %s", srcStr, room)
+		return
+	}
 	entry.mu.Unlock()
 	r.sendRegChallenge(room, cb, src)
 }

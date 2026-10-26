@@ -114,8 +114,11 @@ func TestBaseTLSConfig_MinVersion(t *testing.T) {
 	if !cfg.InsecureSkipVerify {
 		t.Fatal("expected InsecureSkipVerify = true")
 	}
-	if len(cfg.NextProtos) != 1 || cfg.NextProtos[0] != "qvole-v0.1" {
-		t.Fatalf("expected NextProtos [\"qvole-v0.1\"], got %v", cfg.NextProtos)
+	if !cfg.SessionTicketsDisabled {
+		t.Fatal("expected SessionTicketsDisabled = true (VerifyPeerCertificate is skipped on resumed sessions)")
+	}
+	if want := "qvole-v" + ProtocolVersion; len(cfg.NextProtos) != 1 || cfg.NextProtos[0] != want {
+		t.Fatalf("expected NextProtos [%q], got %v", want, cfg.NextProtos)
 	}
 }
 

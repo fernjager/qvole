@@ -13,7 +13,7 @@ import (
 	"github.com/fernjager/qvole/internal/util"
 )
 
-// ProtocolVersion is the wire protocol version string (e.g. "0.1").
+// ProtocolVersion is the wire protocol version string (e.g. "0.2").
 const ProtocolVersion = engine.ProtocolVersion
 
 // Minimum and maximum code lengths enforced by the library.

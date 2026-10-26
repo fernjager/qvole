@@ -23,7 +23,7 @@ removing the attack surface entirely.
 |---|---|---|---|
 | **Code** | Random 52-bit `"NNNN-word-word-word"` | Online guessing, pre-shared secret distribution | 52 bits; relay rate-limiting needed |
 | **SPAKE2 PAKE** | Password-Authenticated Key Exchange over P-256, dual generators M+N | MITM without the code; offline dictionary attacks on relay traffic | No forward secrecy for SPAKE2 keys themselves |
-| **Confirm HMAC** | `HMAC-SHA256(confirmKey, sortedPoints ∥ Ngen ∥ peerFingerprint ∥ nonce ∥ context)` | Impersonation by a peer who only observed the blinded exchange | Bound to SPAKE2 session, not reused |
+| **Confirm HMAC** | `HMAC-SHA256(confirmKey, sortedPoints ∥ Ngen ∥ senderFingerprint ∥ receiverFingerprint ∥ nonce ∥ context)` | Impersonation or fingerprint substitution by a peer/relay who only observed the blinded exchange | Bound to SPAKE2 session and both TLS pins, not reused |
 | **Address encryption** | `AES-256-GCM(encKey, aad=sortedPoints, addr)` | Relay learning peer UDP addresses | Address padding is fixed-length, not variable |
 | **QUIC/TLS 1.3** | Ephemeral self-signed ECDSA P-256 certs + pinned SHA-256 fingerprints | MITM on the direct UDP path; eavesdropping on data | Certificates are self-signed; no CA binding |
 | **Fingerprint binding** | Fingerprint exchanged inside SPAKE2 payload | Downgrade / cert swap attacks | Requires SPAKE2 integrity for binding |
@@ -84,7 +84,7 @@ purpose could be reused in another context:
 | SPAKE2 generator M | `"qvole-spake2-M-v1"` | Custom generator for blinding |
 | SPAKE2 generator N | `"qvole-spake2-N-v1"` | Second generator for domain separation in HKDF salt and confirm HMAC |
 | Session key derivation | `"qvole-spake2-session"` | HKDF key material extraction |
-| Confirm HMAC | `"qvole-spake2-confirm"` | HMAC authentication context (also includes peer cert fingerprint) |
+| Confirm HMAC | `"qvole-spake2-confirm"` | HMAC authentication context (also includes both cert fingerprints and sender/receiver direction) |
 | Room from user code | `"qvole-nameplate:"` | SHA-256 prefix for relay room |
 
 ### Entropy Budget
@@ -151,12 +151,19 @@ the same room (by detecting a `MSGD` reply with a valid-looking SPAKE2 point).
 exhaustively searching 2⁵² codes would take ~10¹³ years. Rate limits are enforced
 in the relay's hot path and cannot be bypassed by a single UDP source.
 
+**Caveat on the code prefix:** generated room names are the 4-digit prefix, so
+an observer who sees a `REG` learns ~13 bits of the ~52-bit code. An online
+guesser who knows the room is left with the three words (~39 bits); SPAKE2 still
+provides no offline verification oracle, and the room/client rate caps keep an
+online search impractical, but the 52-bit figure describes code entropy rather
+than an online work factor.
+
 **Residual risk:** Rooms have no pairwise limit; any number of clients can join
 up to the hard cap (`maxClientsHard`, default 20). An attacker who fills a room
 to the hard cap can observe SPAKE2 blinded points but cannot decrypt metadata
 (protected by the SPAKE2 shared secret). A distributed attack cannot exceed a
 combined 200 msg/s toward a single target room (20 clients × 10 msg/s). The
-10-rooms-per-IP limit further restricts the number of rooms an attacker can
+10-rooms-per-prefix limit (IPv6 is grouped by /64) further restricts the number of rooms an attacker can
 simultaneously probe from a single source. The 1-minute registration TTL bounds
 client lifetime regardless of re-REG activity.
 
@@ -173,8 +180,8 @@ encrypted messaging, QR code in person, voice call).
 
 Two different codes may map to the same relay room: generated codes use the
 4-digit prefix directly; user-provided codes use `SHA-256("qvole-nameplate:" + code)[:4]`
-as an 8-hex-char room name. With ~2¹⁶ possible rooms from the hex derivation,
-room collisions occur with probability ~1/65536 per code pair.
+as an 8-hex-char (32-bit) room name. Room collisions occur with probability
+~1/2³² per code pair.
 
 **Mitigation:** Room collision does not compromise security. Peers with different
 codes compute different `passwordScalar` values, producing different SPAKE2 keys.
@@ -221,7 +228,7 @@ resilience; the relay is a single point of failure for rendezvous.
 **Mitigations in the relay implementation:**
 - Non-blocking packet dispatch prevents the reader goroutine from stalling under load;
   packets are dropped when worker queues fill.
-- Per-IP room cap (10) prevents a single host from exhausting all relay rooms.
+- Per-prefix room cap (10; IPv6 grouped by /64) prevents a single host from exhausting all relay rooms.
 - Stale-room eviction before rejecting at capacity ensures active rooms can always
   be created even when the relay is near its 10,000-room limit.
 - REG rate limiter is sharded across 16 mutexes, eliminating the single global
@@ -354,9 +361,11 @@ An attacker who captures a valid confirm message could replay it in a later sess
 to appear authenticated.
 
 **Mitigation:** The confirm HMAC is bound to the specific session's `confirmKey`
-(derived from both blinding scalars). Replaying the same bytes in a new session
-produces a different expected HMAC because the confirm key is different. The HMAC
-is verified with `subtle.ConstantTimeCompare` to prevent timing side channels.
+(derived from both blinding scalars **and both certificate fingerprints**), the
+directional sender/receiver fingerprints, and a fresh nonce. Replaying the same
+bytes in a new session produces a different expected HMAC because the confirm key
+and nonce are different. The HMAC is verified with
+`subtle.ConstantTimeCompare` to prevent timing side channels.
 
 #### AES-256-GCM Nonce Reuse
 
@@ -465,10 +474,15 @@ An active attacker between the peers could attempt a TLS MITM by presenting thei
 own certificate.
 
 **Mitigation:** The `VerifyPeerCertificate` callback compares `sha256(peerDER)`
-against the fingerprint obtained from the SPAKE2 exchange. The attacker does not
-know the code and cannot compute the correct fingerprint. `InsecureSkipVerify: true`
-disables CA-chain validation but does not weaken this; the custom verification is
-strictly stronger (it pins to an exact key, not a CA hierarchy).
+against the fingerprint obtained from the SPAKE2 exchange. The fingerprint is
+itself authenticated: both peers' certificate fingerprints are bound into the
+HKDF session-key salt and into the confirmation HMAC, with explicit
+sender/receiver directions. A relay that substitutes the fingerprint field in a
+SPAKE2 payload therefore makes confirmation fail instead of causing the victim to
+pin the attacker's certificate. `InsecureSkipVerify: true` disables CA-chain
+validation but does not weaken this; the custom verification is strictly stronger
+(it pins to an exact key, not a CA hierarchy). Protocol 0.1 did not bind the
+sender's fingerprint and is intentionally incompatible (ALPN 0.2).
 
 > **Implementation note:** Both server and client TLS configs share
 > `InsecureSkipVerify: true` via `baseTLSConfig`. Without this, quic-go's server
@@ -513,7 +527,7 @@ exchange; the attacker would also need the code.
 
 #### Cross-Protocol Connection Prevention
 
-The QUIC listener uses ALPN `"qvole-v" + ProtocolVersion` (currently `"qvole-v0.1"`).
+The QUIC listener uses ALPN `"qvole-v" + ProtocolVersion` (currently `"qvole-v0.2"`).
 A `quic-go` client or server with a mismatched ALPN is rejected before the TLS
 handshake begins. This prevents accidental or malicious cross-protocol QUIC
 connections.
@@ -1169,16 +1183,21 @@ slow peers from blocking the relay.
 | `ConfirmPayloadSize` | `internal/engine/connect.go` | 160 | Fixed confirm size (incl. 32 B random padding) |
 | `maxMsgRate` | `relay/room.go` | 10/s | Rate limit |
 | `maxRooms` | `relay/room.go` | 10000 | Room cap |
-| `maxRoomsPerIP` | `relay/room.go` | 10 | Per-IP room cap |
+| `maxRoomsPerIP` | `relay/room.go` | 10 | Per-prefix room cap (IPv6 /64) |
 | `maxClientsHard` | `relay/room.go` | 20 | Hard cap on clients per room (abuse guard) |
-| `maxPendingPerIP` | `relay/room.go` | 50 | Per-IP cap on pending (pre-cookie) registrations |
+| `maxPendingPerIP` | `relay/room.go` | 50 | Per-prefix cap on pending (pre-cookie) registrations |
+| `maxPendingGlobal` | `relay/room.go` | 65536 | Cap on the pre-cookie store for non-existent rooms |
+| `maxInRoomPending` | `relay/room.go` | 65536 | Relay-wide cap on pending entries in existing rooms |
+| `maxPendingPerRoom` | `relay/room.go` | 256 | Per-room pending cap (prevents one room from consuming the budget) |
+| `maxClientsPerPrefixPerRoom` | `relay/room.go` | 4 | Per-IPv4/prefix(/64) client cap per room |
 | `maxDatagramLen` | `relay/room.go` | 1400 | Raw UDP datagram limit |
-| `MaxIncomingUniStreams` | `internal/engine/transport.go` | 0 | No uni streams |
+| `MaxIncomingUniStreams` | `internal/engine/transport.go` | -1 | No uni streams |
 | `maxTunnelRequests` | `internal/app/tunnel_request.go` | 100 | Spec count limit |
 | `streamHeaderTimeout` | `internal/app/tunnel_request.go` | 15 s | Tunnel stream header read deadline |
 | `streamConfigTimeout` | `internal/app/tunnel_request.go` | 30 s | Control stream config read deadline |
 | `ForwardMaxStreams` | `internal/engine/transport.go` | 200 | Max concurrent tunnel streams (overridable via `QVOLE_FORWARD_MAX_STREAMS` or library `WithForwardMaxStreams`) |
-| `InsecureSkipVerify` | `internal/engine/transport.go` | true | Self-signed cert bypass |
+| `InsecureSkipVerify` | `internal/engine/transport.go` | true | Self-signed cert bypass (custom fingerprint pinning) |
+| `SessionTicketsDisabled` | `internal/engine/transport.go` | true | Prevent TLS resumption from skipping `VerifyPeerCertificate` |
 
 ---
 

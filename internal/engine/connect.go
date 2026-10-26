@@ -46,6 +46,9 @@ func (c PeerConfig) readDeadline() time.Duration {
 func (c PeerConfig) regInterval() time.Duration {
 	return resolveDur(c.RegInterval, "QVOLE_REG_INTERVAL_MS", RegInterval)
 }
+func (c PeerConfig) handshakeTimeout() time.Duration {
+	return resolveDur(c.HandshakeTimeout, "QVOLE_HANDSHAKE_TIMEOUT_MS", defaultHandshakeIdleTimeout)
+}
 
 func resolveDur(val time.Duration, envName string, def time.Duration) time.Duration {
 	if val > 0 {
@@ -126,7 +129,13 @@ func ConnectPeerWithConfig(ctx context.Context, relayAddr string, code string, c
 		udpConn.Close()
 		return nil, false, fmt.Errorf("resolve peer: %w", err)
 	}
-	if peerUDPAddr.IP == nil || peerUDPAddr.Port == 0 {
+	if peerUDPAddr.IP == nil || peerUDPAddr.Port == 0 ||
+		peerUDPAddr.IP.IsUnspecified() || peerUDPAddr.IP.IsMulticast() ||
+		peerUDPAddr.IP.Equal(net.IPv4bcast) {
+		// The address is supplied by the (untrusted) relay and authenticated
+		// only as the peer's claimed address. Reject non-unicast destinations
+		// so hole-punch/QUIC traffic cannot be aimed at a broadcast/multicast
+		// group.
 		udpConn.Close()
 		return nil, false, fmt.Errorf("invalid peer address: %q", peerAddrStr)
 	}
@@ -180,7 +189,11 @@ func ConnectPeerWithConfig(ctx context.Context, relayAddr string, code string, c
 			return nil, false, fmt.Errorf("listen: %w", err)
 		}
 		defer ln.Close()
-		conn, err = ln.Accept(ctx)
+		// Bound the listener wait: a malicious peer (or a reflection attack)
+		// can otherwise leave this side blocked in Accept until SIGINT.
+		acceptCtx, cancelAccept := context.WithTimeout(ctx, cfg.handshakeTimeout())
+		conn, err = ln.Accept(acceptCtx)
+		cancelAccept()
 		if err != nil {
 			udpConn.Close()
 			util.LogHole.PrintfError("QUIC accept failed: %v", err)

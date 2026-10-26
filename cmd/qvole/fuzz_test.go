@@ -218,12 +218,15 @@ func FuzzVerifyConfirm(f *testing.F) {
 	}
 
 	myShared, _ := myState.ComputeShared(peerPoint, peerUsedM)
-	ck, _, _ := spake2.DeriveSessionKey(myShared, myPoint, peerPoint)
+	validFingerprint := make([]byte, 32)
+	_, _ = rand.Read(validFingerprint)
+	peerFingerprint := make([]byte, 32)
+	_, _ = rand.Read(peerFingerprint)
+	ck, _, _ := spake2.DeriveSessionKey(myShared, myPoint, peerPoint, validFingerprint, peerFingerprint)
 
 	validNonce := make([]byte, 16)
 	_, _ = rand.Read(validNonce)
-	validFingerprint := make([]byte, 32)
-	validConfirm, _ := spake2.ComputeConfirm(ck, myPoint, peerPoint, validNonce, validFingerprint)
+	validConfirm, _ := spake2.ComputeConfirm(ck, myPoint, peerPoint, validNonce, validFingerprint, peerFingerprint)
 	wrongConfirm := make([]byte, 32)
 
 	f.Add(validConfirm, validNonce)
@@ -236,6 +239,6 @@ func FuzzVerifyConfirm(f *testing.F) {
 		if len(nonce) == 0 {
 			return
 		}
-		spake2.VerifyConfirm(ck, myPoint, peerPoint, nonce, validFingerprint, confirm)
+		spake2.VerifyConfirm(ck, myPoint, peerPoint, nonce, validFingerprint, peerFingerprint, confirm)
 	})
 }

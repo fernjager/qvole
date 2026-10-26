@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -15,15 +16,20 @@ import (
 )
 
 const (
-	pointLen              = 65
-	spake2PayloadLen      = pointLen*2 + fingerprintSize
-	fingerprintSize       = 32
-	maxCandidates         = 50
-	maxBufferedConfirms   = 200
-	readBufferSize        = 1500
-	spake2ResendInterval  = 2 * time.Second
-	confirmResendInterval = 2 * time.Second
-	exchangeReadDeadline  = 1 * time.Second
+	pointLen            = 65
+	spake2PayloadLen    = pointLen*2 + fingerprintSize
+	fingerprintSize     = 32
+	maxCandidates       = 50
+	maxBufferedConfirms = 200
+	readBufferSize      = 1500
+	// maxInboundMSGDPerSecond bounds work an on-path/malicious relay can
+	// force: each SPAKE2 point costs P-256 operations and each confirm can be
+	// tried against every candidate. Legitimate room traffic is far below this
+	// (the relay caps each client at 10 msg/s and a room at 20 clients).
+	maxInboundMSGDPerSecond = 500
+	spake2ResendInterval    = 2 * time.Second
+	confirmResendInterval   = 2 * time.Second
+	exchangeReadDeadline    = 1 * time.Second
 )
 
 // processSpakeMsg parses the peer's SPAKE2 payload (myPointM || myPointN || fingerprint),
@@ -32,7 +38,7 @@ const (
 //	Server (larger M-point) uses N; Client uses M.
 //
 // Returns the effective points, fingerprint, role, and derived session keys.
-func processSpakeMsg(body string, state *spake2.State, myPointM, myPointN []byte) (effectiveMyPoint, effectivePeerPoint, peerFingerprint []byte, isServer bool, confirmKey, encKey []byte, err error) {
+func processSpakeMsg(body string, state *spake2.State, myPointM, myPointN, myFingerprint []byte) (effectiveMyPoint, effectivePeerPoint, peerFingerprint []byte, isServer bool, confirmKey, encKey []byte, err error) {
 	peerPayload, err := hex.DecodeString(body)
 	if err != nil {
 		return nil, nil, nil, false, nil, nil, err
@@ -43,6 +49,9 @@ func processSpakeMsg(body string, state *spake2.State, myPointM, myPointN []byte
 	peerPointM := peerPayload[:pointLen]
 	peerPointN := peerPayload[pointLen : pointLen*2]
 	peerFingerprint = peerPayload[pointLen*2 : spake2PayloadLen]
+	if bytes.Equal(myFingerprint, peerFingerprint) {
+		return nil, nil, nil, false, nil, nil, fmt.Errorf("spake2: peer sent reflected certificate fingerprint")
+	}
 
 	if cmp := bytes.Compare(myPointM, peerPointM); cmp == 0 {
 		return nil, nil, nil, false, nil, nil, fmt.Errorf("spake2: peer sent reflected point")
@@ -63,7 +72,7 @@ func processSpakeMsg(body string, state *spake2.State, myPointM, myPointN []byte
 	if err != nil {
 		return nil, nil, nil, false, nil, nil, err
 	}
-	ck, ek, err := spake2.DeriveSessionKey(shared, effectiveMyPoint, effectivePeerPoint)
+	ck, ek, err := spake2.DeriveSessionKey(shared, effectiveMyPoint, effectivePeerPoint, myFingerprint, peerFingerprint)
 	spake2.ZeroBytes(shared)
 	if err != nil {
 		return nil, nil, nil, false, nil, nil, fmt.Errorf("spake2 derive key: %w", err)
@@ -71,13 +80,13 @@ func processSpakeMsg(body string, state *spake2.State, myPointM, myPointN []byte
 	return effectiveMyPoint, effectivePeerPoint, peerFingerprint, isServer, ck, ek, nil
 }
 
-func buildConfirmPayload(confirmKey, encKey, myPoint, peerPoint, peerFingerprint, myAddr []byte) ([]byte, error) {
+func buildConfirmPayload(confirmKey, encKey, myPoint, peerPoint, myFingerprint, peerFingerprint, myAddr []byte) ([]byte, error) {
 	aad := spake2.SessionAAD(myPoint, peerPoint)
 	confirmNonce := make([]byte, 16)
 	if _, err := rand.Read(confirmNonce); err != nil {
 		return nil, fmt.Errorf("rand confirm nonce: %w", err)
 	}
-	confirm, err := spake2.ComputeConfirm(confirmKey, myPoint, peerPoint, confirmNonce, peerFingerprint)
+	confirm, err := spake2.ComputeConfirm(confirmKey, myPoint, peerPoint, confirmNonce, myFingerprint, peerFingerprint)
 	if err != nil {
 		return nil, fmt.Errorf("compute confirm: %w", err)
 	}
@@ -109,7 +118,7 @@ func buildConfirmPayload(confirmKey, encKey, myPoint, peerPoint, peerFingerprint
 	return cp, nil
 }
 
-func processConfirmMsg(hexBody string, confirmKey, encKey, myPoint, peerPoint, myFingerprint []byte) (peerAddr string, err error) {
+func processConfirmMsg(hexBody string, confirmKey, encKey, myPoint, peerPoint, myFingerprint, peerFingerprint []byte) (peerAddr string, err error) {
 	peerConfirmPayload, err := hex.DecodeString(hexBody)
 	if err != nil {
 		return "", err
@@ -121,7 +130,7 @@ func processConfirmMsg(hexBody string, confirmKey, encKey, myPoint, peerPoint, m
 	peerConfirm := peerConfirmPayload[confirmNonceSize : confirmNonceSize+confirmHMACSize]
 	peerEncAddr := peerConfirmPayload[confirmNonceSize+confirmHMACSize : confirmNonceSize+confirmHMACSize+EncryptedAddrSize]
 
-	if !spake2.VerifyConfirm(confirmKey, myPoint, peerPoint, peerNonce, myFingerprint, peerConfirm) {
+	if !spake2.VerifyConfirm(confirmKey, myPoint, peerPoint, peerNonce, myFingerprint, peerFingerprint, peerConfirm) {
 		return "", fmt.Errorf("spake2 confirmation mismatch")
 	}
 	aad := spake2.SessionAAD(myPoint, peerPoint)
@@ -130,6 +139,21 @@ func processConfirmMsg(hexBody string, confirmKey, encKey, myPoint, peerPoint, m
 		return "", fmt.Errorf("decrypt peer addr: %w", err)
 	}
 	return strings.TrimRight(string(peerAddrBytes), "\x00"), nil
+}
+
+// printableASCII reports whether s consists only of visible ASCII bytes. Used
+// to reject relay-supplied address strings that would otherwise inject
+// control characters into logs or be passed to the resolver.
+func printableASCII(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 33 || s[i] > 126 {
+			return false
+		}
+	}
+	return true
 }
 
 func detectOutboundAddr(udpConn *net.UDPConn) string {
@@ -188,6 +212,9 @@ func registerAndExchange(ctx context.Context, udpConn *net.UDPConn, room, code s
 	deadline := time.Now().Add(exchangeDeadline)
 	lastSpake2Sent := time.Time{}
 	lastRegSent := time.Time{}
+	lastExtAddrLog := time.Time{}
+	inboundWindow := time.Time{}
+	inboundCount := 0
 	receivedREGD := false
 	pendingCookie := "" // hex cookie from relay REGD challenge
 
@@ -234,6 +261,18 @@ func registerAndExchange(ctx context.Context, udpConn *net.UDPConn, room, code s
 
 		line := bytes.TrimSpace(readBuf[:n])
 
+		if bytes.HasPrefix(line, []byte("MSGD ")) {
+			now := time.Now()
+			if now.Sub(inboundWindow) >= time.Second {
+				inboundWindow = now
+				inboundCount = 0
+			}
+			inboundCount++
+			if inboundCount > maxInboundMSGDPerSecond {
+				continue
+			}
+		}
+
 		if bytes.HasPrefix(line, []byte("REGD ")) {
 			rest := line[len("REGD "):]
 			relayRoom, relayPayload, found := bytes.Cut(rest, []byte(" "))
@@ -245,9 +284,19 @@ func registerAndExchange(ctx context.Context, udpConn *net.UDPConn, room, code s
 			if strings.HasPrefix(payload, "OK ") {
 				receivedREGD = true
 				extAddr := strings.TrimSpace(payload[3:])
-				if extAddr != "" {
+				// The relay is untrusted: only accept a printable literal
+				// IP:port (never a hostname, which would trigger DNS and allow
+				// redirecting the peer's hole-punch/QUIC traffic), and log it
+				// quoted so control characters cannot drive the terminal.
+				// Otherwise keep the locally detected address.
+				if ap, addrErr := netip.ParseAddrPort(extAddr); addrErr == nil && ap.Port() != 0 && printableASCII(extAddr) {
 					myAddr = extAddr
-					util.LogRelay.PrintfSuccess("Connected! Ext. address: %s", util.Bold(myAddr))
+					// A relay/same-L2 attacker can repeat REGD OK cheaply;
+					// rate-limit the success log so it cannot flood stderr.
+					if time.Since(lastExtAddrLog) >= time.Second {
+						util.LogRelay.PrintfSuccess("Connected! Ext. address: %q", extAddr)
+						lastExtAddrLog = time.Now()
+					}
 				}
 				continue
 			}
@@ -266,43 +315,65 @@ func registerAndExchange(ctx context.Context, udpConn *net.UDPConn, room, code s
 
 			peerPayload, decErr := hex.DecodeString(hexBody)
 			if decErr != nil || len(peerPayload) < spake2PayloadLen {
-				util.LogSPAKE2.PrintfWarn("Invalid SPAKE2 message: short payload")
+				util.LogSPAKE2.Printf("Invalid SPAKE2 message: short payload")
 				continue
 			}
-			pointHex := hex.EncodeToString(peerPayload[:pointLen])
-			if _, exists := candidates[pointHex]; exists {
+			// Deduplicate by the complete payload (M, N, fingerprint), not
+			// just M: a fake payload that reuses the real peer's M point but
+			// carries an attacker fingerprint must not shadow the genuine
+			// retransmissions.
+			payloadHex := hex.EncodeToString(peerPayload[:spake2PayloadLen])
+			if _, exists := candidates[payloadHex]; exists {
 				continue
 			}
-			if len(candidates) >= maxCandidates {
-				util.LogSPAKE2.PrintfWarn("Too many SPAKE2 candidates (%d), dropping", len(candidates))
-				continue
-			}
-
-			effectiveMyPoint, effectivePeerPoint, fp, srv, ck, ek, pErr := processSpakeMsg(hexBody, state, myPointM, myPointN)
+			effectiveMyPoint, effectivePeerPoint, fp, srv, ck, ek, pErr := processSpakeMsg(hexBody, state, myPointM, myPointN, myFingerprint)
 			if pErr != nil {
-				util.LogSPAKE2.PrintfWarn("Invalid SPAKE2 message: %v", pErr)
+				util.LogSPAKE2.Printf("Invalid SPAKE2 message: %v", pErr)
 				continue
 			}
-			cp, pErr := buildConfirmPayload(ck, ek, effectiveMyPoint, effectivePeerPoint, fp, []byte(myAddr))
+			cp, pErr := buildConfirmPayload(ck, ek, effectiveMyPoint, effectivePeerPoint, myFingerprint, fp, []byte(myAddr))
 			if pErr != nil {
-				util.LogSPAKE2.PrintfError("Failed to build confirm payload: %v", pErr)
+				util.LogSPAKE2.Printf("Failed to build confirm payload: %v", pErr)
 				spake2.ZeroBytes(ck)
 				spake2.ZeroBytes(ek)
 				continue
 			}
-			candidates[pointHex] = &peerCandidate{
+
+			if len(candidates) >= maxCandidates {
+				// Never hard-drop new points, but only evict after the new
+				// payload has passed validation, so invalid payloads cannot
+				// evict legitimate candidates. Drop the candidate whose
+				// confirm was sent longest ago; the real peer retries every
+				// 2 s and can re-enter.
+				evictKey := ""
+				var evictAt time.Time
+				for k := range candidates {
+					t := confirmLastSent[k]
+					if evictKey == "" || t.Before(evictAt) {
+						evictKey, evictAt = k, t
+					}
+				}
+				if c, ok := candidates[evictKey]; ok {
+					spake2.ZeroBytes(c.confirmKey)
+					spake2.ZeroBytes(c.encKey)
+				}
+				delete(candidates, evictKey)
+				delete(confirmLastSent, evictKey)
+				util.LogSPAKE2.Printf("SPAKE2 candidate table full (%d), evicting oldest", maxCandidates)
+			}
+			candidates[payloadHex] = &peerCandidate{
 				point: effectivePeerPoint, fingerprint: fp, confirmKey: ck, encKey: ek,
 				confirmPayload: cp, isServer: srv, effectiveMyPoint: effectiveMyPoint,
 			}
 			allKeys = append(allKeys, ck, ek)
 
 			udpConn.Write([]byte(fmt.Sprintf("MSG %s confirm %x\n", room, cp)))
-			confirmLastSent[pointHex] = time.Now()
+			confirmLastSent[payloadHex] = time.Now()
 
-			util.LogSPAKE2.PrintfSuccess("Points exchanged with peer")
+			util.LogSPAKE2.Printf("Points exchanged with peer")
 
 			for _, hexBody := range bufferedConfirms {
-				pa, pErr := processConfirmMsg(hexBody, ck, ek, effectiveMyPoint, effectivePeerPoint, myFingerprint)
+				pa, pErr := processConfirmMsg(hexBody, ck, ek, effectiveMyPoint, effectivePeerPoint, myFingerprint, fp)
 				if pErr != nil {
 					continue
 				}
@@ -315,7 +386,7 @@ func registerAndExchange(ctx context.Context, udpConn *net.UDPConn, room, code s
 			hexBody := string(line[len("MSGD confirm "):])
 
 			for _, cand := range candidates {
-				pa, pErr := processConfirmMsg(hexBody, cand.confirmKey, cand.encKey, cand.effectiveMyPoint, cand.point, myFingerprint)
+				pa, pErr := processConfirmMsg(hexBody, cand.confirmKey, cand.encKey, cand.effectiveMyPoint, cand.point, myFingerprint, cand.fingerprint)
 				if pErr != nil {
 					continue
 				}

@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] - 2026-10-26
+
+### Security
+- Fix a critical relay impersonation: the confirm HMAC and HKDF now bind both
+  peers' certificate fingerprints in sender/receiver order, and reflected
+  fingerprints are rejected. Protocol 0.2 is wire-breaking; 0.1 peers are
+  rejected by ALPN.
+- Harden the relay: per-room pending caps and separate budgets, global
+  drop-log limits and map cap, IPv6 /64 aggregation for per-prefix limits,
+  per-prefix client caps, and TTL checks at cookie completion.
+- Disable TLS session tickets and accept only literal IP:port relay-supplied
+  addresses; reject unspecified/multicast/broadcast peer targets.
+- Deduplicate SPAKE2 candidates by full payload with bounded eviction, rate-limit
+  inbound `MSGD`, and bound the QUIC listener wait.
+
 ## [0.2.4] - 2026-10-21
 
 ### Security

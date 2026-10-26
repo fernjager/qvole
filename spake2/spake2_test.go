@@ -1,6 +1,7 @@
 package spake2
 
 import (
+	"bytes"
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/hex"
@@ -14,6 +15,13 @@ var testFingerprint = []byte{
 	0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89,
 	0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89,
 	0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89,
+}
+
+var testFingerprintB = []byte{
+	0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE,
+	0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE,
+	0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE,
+	0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE,
 }
 
 func TestSPAKE2_PasswordToScalar_Deterministic(t *testing.T) {
@@ -131,11 +139,11 @@ func TestSPAKE2_DeriveSessionKey_Deterministic(t *testing.T) {
 	myPoint := []byte("test-my-point-32bytes!")
 	peerPoint := []byte("test-peer-point-32bytes")
 
-	cK1, eK1, err := DeriveSessionKey(shared, myPoint, peerPoint)
+	cK1, eK1, err := DeriveSessionKey(shared, myPoint, peerPoint, testFingerprint, testFingerprintB)
 	if err != nil {
 		t.Fatalf("derive key 1: %v", err)
 	}
-	cK2, eK2, err := DeriveSessionKey(shared, myPoint, peerPoint)
+	cK2, eK2, err := DeriveSessionKey(shared, myPoint, peerPoint, testFingerprint, testFingerprintB)
 	if err != nil {
 		t.Fatalf("derive key 2: %v", err)
 	}
@@ -241,8 +249,8 @@ func TestSPAKE2_Confirm_Deterministic(t *testing.T) {
 	peerPoint := []byte("point-b")
 	nonce := []byte("0123456789abcdef")
 
-	c1, _ := ComputeConfirm(sessionKey, myPoint, peerPoint, nonce, testFingerprint)
-	c2, _ := ComputeConfirm(sessionKey, myPoint, peerPoint, nonce, testFingerprint)
+	c1, _ := ComputeConfirm(sessionKey, myPoint, peerPoint, nonce, testFingerprint, testFingerprintB)
+	c2, _ := ComputeConfirm(sessionKey, myPoint, peerPoint, nonce, testFingerprint, testFingerprintB)
 	if string(c1) != string(c2) {
 		t.Fatal("ComputeConfirm not deterministic")
 	}
@@ -255,8 +263,8 @@ func TestSPAKE2_Confirm_Ordering(t *testing.T) {
 	b := []byte("bbbb")
 	nonce := []byte("0123456789abcdef")
 
-	cAB, _ := ComputeConfirm(sessionKey, a, b, nonce, testFingerprint)
-	cSwap, _ := ComputeConfirm(sessionKey, b, a, nonce, testFingerprint)
+	cAB, _ := ComputeConfirm(sessionKey, a, b, nonce, testFingerprint, testFingerprintB)
+	cSwap, _ := ComputeConfirm(sessionKey, b, a, nonce, testFingerprint, testFingerprintB)
 	if string(cAB) != string(cSwap) {
 		t.Fatal("ComputeConfirm should sort points, order must not matter")
 	}
@@ -269,8 +277,8 @@ func TestSPAKE2_Confirm_Verify(t *testing.T) {
 	peerPoint := []byte("peer-point")
 	nonce := []byte("0123456789abcdef")
 
-	confirm, _ := ComputeConfirm(sessionKey, myPoint, peerPoint, nonce, testFingerprint)
-	if !VerifyConfirm(sessionKey, myPoint, peerPoint, nonce, testFingerprint, confirm) {
+	confirm, _ := ComputeConfirm(sessionKey, myPoint, peerPoint, nonce, testFingerprint, testFingerprintB)
+	if !VerifyConfirm(sessionKey, myPoint, peerPoint, nonce, testFingerprintB, testFingerprint, confirm) {
 		t.Fatal("VerifyConfirm returned false for correct confirm")
 	}
 }
@@ -281,8 +289,8 @@ func TestSPAKE2_Confirm_WrongKey(t *testing.T) {
 	rand.Read(key2)
 	nonce := []byte("0123456789abcdef")
 
-	confirm, _ := ComputeConfirm(key1, []byte("a"), []byte("b"), nonce, testFingerprint)
-	if VerifyConfirm(key2, []byte("a"), []byte("b"), nonce, testFingerprint, confirm) {
+	confirm, _ := ComputeConfirm(key1, []byte("a"), []byte("b"), nonce, testFingerprint, testFingerprintB)
+	if VerifyConfirm(key2, []byte("a"), []byte("b"), nonce, testFingerprintB, testFingerprint, confirm) {
 		t.Fatal("VerifyConfirm returned true with wrong key")
 	}
 }
@@ -293,8 +301,8 @@ func TestSPAKE2_Confirm_WrongNonce(t *testing.T) {
 	correctNonce := []byte("0123456789abcdef")
 	wrongNonce := []byte("fedcba9876543210")
 
-	confirm, _ := ComputeConfirm(key, []byte("a"), []byte("b"), correctNonce, testFingerprint)
-	if VerifyConfirm(key, []byte("a"), []byte("b"), wrongNonce, testFingerprint, confirm) {
+	confirm, _ := ComputeConfirm(key, []byte("a"), []byte("b"), correctNonce, testFingerprint, testFingerprintB)
+	if VerifyConfirm(key, []byte("a"), []byte("b"), wrongNonce, testFingerprintB, testFingerprint, confirm) {
 		t.Fatal("VerifyConfirm returned true with wrong nonce")
 	}
 }
@@ -332,11 +340,11 @@ func TestSPAKE2_FullExchange(t *testing.T) {
 		bobPoint = bobN
 	}
 
-	aliceCKey, aliceEKey, err := DeriveSessionKey(aliceShared, alicePoint, bobPoint)
+	aliceCKey, aliceEKey, err := DeriveSessionKey(aliceShared, alicePoint, bobPoint, testFingerprint, testFingerprintB)
 	if err != nil {
 		t.Fatalf("alice key: %v", err)
 	}
-	bobCKey, bobEKey, err := DeriveSessionKey(bobShared, bobPoint, alicePoint)
+	bobCKey, bobEKey, err := DeriveSessionKey(bobShared, bobPoint, alicePoint, testFingerprintB, testFingerprint)
 	if err != nil {
 		t.Fatalf("bob key: %v", err)
 	}
@@ -344,13 +352,13 @@ func TestSPAKE2_FullExchange(t *testing.T) {
 	aliceNonce := []byte("alice-nonce-1234")
 	bobNonce := []byte("bob-nonce-567890")
 
-	aliceConfirm, _ := ComputeConfirm(aliceCKey, alicePoint, bobPoint, aliceNonce, testFingerprint)
-	bobConfirm, _ := ComputeConfirm(bobCKey, bobPoint, alicePoint, bobNonce, testFingerprint)
+	aliceConfirm, _ := ComputeConfirm(aliceCKey, alicePoint, bobPoint, aliceNonce, testFingerprint, testFingerprintB)
+	bobConfirm, _ := ComputeConfirm(bobCKey, bobPoint, alicePoint, bobNonce, testFingerprintB, testFingerprint)
 
-	if !VerifyConfirm(aliceCKey, alicePoint, bobPoint, bobNonce, testFingerprint, bobConfirm) {
+	if !VerifyConfirm(aliceCKey, alicePoint, bobPoint, bobNonce, testFingerprint, testFingerprintB, bobConfirm) {
 		t.Fatal("alice rejected bob's confirm")
 	}
-	if !VerifyConfirm(bobCKey, bobPoint, alicePoint, aliceNonce, testFingerprint, aliceConfirm) {
+	if !VerifyConfirm(bobCKey, bobPoint, alicePoint, aliceNonce, testFingerprintB, testFingerprint, aliceConfirm) {
 		t.Fatal("bob rejected alice's confirm")
 	}
 
@@ -410,10 +418,10 @@ func TestSPAKE2_ReplayConfirm(t *testing.T) {
 		bob1Point = bob1N
 	}
 
-	ck1, _, _ := DeriveSessionKey(alice1Shared, alice1Point, bob1Point)
+	ck1, _, _ := DeriveSessionKey(alice1Shared, alice1Point, bob1Point, testFingerprint, testFingerprintB)
 
 	nonce := []byte("session1-nonce-123")
-	confirm, _ := ComputeConfirm(ck1, alice1Point, bob1Point, nonce, testFingerprint)
+	confirm, _ := ComputeConfirm(ck1, alice1Point, bob1Point, nonce, testFingerprint, testFingerprintB)
 
 	alice2, _ := NewState(password)
 	bob2, _ := NewState(password)
@@ -435,9 +443,9 @@ func TestSPAKE2_ReplayConfirm(t *testing.T) {
 		bob2Point = bob2N
 	}
 
-	ck2, _, _ := DeriveSessionKey(alice2Shared, alice2Point, bob2Point)
+	ck2, _, _ := DeriveSessionKey(alice2Shared, alice2Point, bob2Point, testFingerprint, testFingerprintB)
 
-	if VerifyConfirm(ck2, alice2Point, bob2Point, nonce, testFingerprint, confirm) {
+	if VerifyConfirm(ck2, alice2Point, bob2Point, nonce, testFingerprintB, testFingerprint, confirm) {
 		t.Fatal("replayed confirm should not verify with different session")
 	}
 }
@@ -706,7 +714,7 @@ func TestSPAKE2_ComputeShared_Exact32BytePad(t *testing.T) {
 func TestSPAKE2_Confirm_EmptyNonceReturnsError(t *testing.T) {
 	sessionKey := make([]byte, 32)
 	rand.Read(sessionKey)
-	_, err := ComputeConfirm(sessionKey, []byte("a"), []byte("b"), []byte{}, testFingerprint)
+	_, err := ComputeConfirm(sessionKey, []byte("a"), []byte("b"), []byte{}, testFingerprint, testFingerprintB)
 	if err == nil {
 		t.Fatal("expected error for empty nonce")
 	}
@@ -785,12 +793,12 @@ func TestSPAKE2_DeriveSessionKey_OrderingIndependence(t *testing.T) {
 	pointA := []byte("point-a-32-bytes-long-padding!!!")
 	pointB := []byte("point-b-32-bytes-long-padding!!!")
 
-	ck1, ek1, err := DeriveSessionKey(shared, pointA, pointB)
+	ck1, ek1, err := DeriveSessionKey(shared, pointA, pointB, testFingerprint, testFingerprintB)
 	if err != nil {
 		t.Fatalf("derive key 1: %v", err)
 	}
 
-	ck2, ek2, err := DeriveSessionKey(shared, pointB, pointA)
+	ck2, ek2, err := DeriveSessionKey(shared, pointB, pointA, testFingerprint, testFingerprintB)
 	if err != nil {
 		t.Fatalf("derive key 2: %v", err)
 	}
@@ -809,8 +817,8 @@ func TestSPAKE2_Confirm_BitDiffInNonce(t *testing.T) {
 	nonce1 := []byte("0123456789abcdef")
 	nonce2 := []byte("0123456789abcdee") // differ in last bit
 
-	c1, _ := ComputeConfirm(sessionKey, []byte("a"), []byte("b"), nonce1, testFingerprint)
-	c2, _ := ComputeConfirm(sessionKey, []byte("a"), []byte("b"), nonce2, testFingerprint)
+	c1, _ := ComputeConfirm(sessionKey, []byte("a"), []byte("b"), nonce1, testFingerprint, testFingerprintB)
+	c2, _ := ComputeConfirm(sessionKey, []byte("a"), []byte("b"), nonce2, testFingerprint, testFingerprintB)
 
 	if string(c1) == string(c2) {
 		t.Fatal("different nonces should produce different confirms")
@@ -893,4 +901,81 @@ func TestSPAKE2_NoOfflineOracle(t *testing.T) {
 	if correctX.Cmp(deltaX) == 0 && correctY.Cmp(deltaY) == 0 {
 		t.Fatal("correct password matched delta; single-scalar regression?")
 	}
+}
+
+func TestSPAKE2_Confirm_BindsBothFingerprints(t *testing.T) {
+	sessionKey := make([]byte, 32)
+	rand.Read(sessionKey)
+	myPoint := []byte("point-a")
+	peerPoint := []byte("point-b")
+	nonce := []byte("0123456789abcdef")
+
+	// Alice -> Bob: sender is Alice's fingerprint, receiver is Bob's.
+	confirm := mustConfirm(t, sessionKey, myPoint, peerPoint, nonce, testFingerprint, testFingerprintB)
+	if !VerifyConfirm(sessionKey, myPoint, peerPoint, nonce, testFingerprintB, testFingerprint, confirm) {
+		t.Fatal("Bob rejected Alice's correctly bound confirm")
+	}
+
+	// A relay substitutes Alice's view of Bob's fingerprint. The resulting
+	// confirm must not verify at Bob, because Bob checks his own fingerprint.
+	substituted := mustConfirm(t, sessionKey, myPoint, peerPoint, nonce, testFingerprint, bytes.Repeat([]byte{0x42}, 32))
+	if VerifyConfirm(sessionKey, myPoint, peerPoint, nonce, testFingerprintB, testFingerprint, substituted) {
+		t.Fatal("confirm with a substituted receiver fingerprint verified")
+	}
+
+	// Likewise, checking a genuine confirm against a substituted peer
+	// fingerprint must fail.
+	if VerifyConfirm(sessionKey, myPoint, peerPoint, nonce, testFingerprintB, bytes.Repeat([]byte{0x43}, 32), confirm) {
+		t.Fatal("genuine confirm verified against a substituted peer fingerprint")
+	}
+}
+
+func TestSPAKE2_Confirm_RejectsReflection(t *testing.T) {
+	sessionKey := make([]byte, 32)
+	rand.Read(sessionKey)
+	nonce := []byte("0123456789abcdef")
+
+	if _, err := ComputeConfirm(sessionKey, []byte("a"), []byte("b"), nonce, testFingerprint, testFingerprint); err == nil {
+		t.Fatal("ComputeConfirm accepted identical sender/receiver fingerprints")
+	}
+	if VerifyConfirm(sessionKey, []byte("a"), []byte("b"), nonce, testFingerprint, testFingerprint, make([]byte, 32)) {
+		t.Fatal("VerifyConfirm accepted a reflected fingerprint")
+	}
+}
+
+func TestSPAKE2_DeriveSessionKey_BindsFingerprints(t *testing.T) {
+	shared := make([]byte, 32)
+	rand.Read(shared)
+	pointA := []byte("point-a")
+	pointB := []byte("point-b")
+
+	ck1, _, err := DeriveSessionKey(shared, pointA, pointB, testFingerprint, testFingerprintB)
+	if err != nil {
+		t.Fatalf("derive: %v", err)
+	}
+	// Fingerprint order is sorted, so the other side derives the same key.
+	ck2, _, err := DeriveSessionKey(shared, pointA, pointB, testFingerprintB, testFingerprint)
+	if err != nil {
+		t.Fatalf("derive (swapped): %v", err)
+	}
+	if !bytes.Equal(ck1, ck2) {
+		t.Fatal("fingerprint order should not affect the session key")
+	}
+	// A substituted peer fingerprint must produce a different key.
+	ck3, _, err := DeriveSessionKey(shared, pointA, pointB, testFingerprint, bytes.Repeat([]byte{0x44}, 32))
+	if err != nil {
+		t.Fatalf("derive (substituted): %v", err)
+	}
+	if bytes.Equal(ck1, ck3) {
+		t.Fatal("session key did not bind the peer fingerprint")
+	}
+}
+
+func mustConfirm(t *testing.T, key, myPoint, peerPoint, nonce, senderFP, receiverFP []byte) []byte {
+	t.Helper()
+	confirm, err := ComputeConfirm(key, myPoint, peerPoint, nonce, senderFP, receiverFP)
+	if err != nil {
+		t.Fatalf("ComputeConfirm: %v", err)
+	}
+	return confirm
 }
