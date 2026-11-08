@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.6] - 2026-11-08
+
+### Security
+- Update `golang.org/x/net` to v0.62.0, clearing GO-2026-6860 and
+  GO-2026-6866 (quadratic text-node coalescing and namespace-transition
+  handling in the `html` package). qvole does not import `html`, and
+  `govulncheck` reports no reachable vulnerabilities; the remaining
+  `x/crypto/openpgp` advisory is module-level and openpgp is not imported.
+
+### Changed
+- Update `github.com/quic-go/quic-go` to v0.65.0, which fixes QUIC v2 key
+  update labels, path migration and NEW_CONNECTION_ID handling, DATAGRAM ACK
+  starvation, `CancelRead` after `RESET_STREAM_AT`, and quadratic copying in
+  `TryWriteAll`.
+- Update the indirect `go.yaml.in/yaml/v3` to v3.0.6 and bump the binary
+  version to 0.2.6.
+
 ## [0.2.5] - 2026-10-26
 
 ### Security
