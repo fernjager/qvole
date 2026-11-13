@@ -167,6 +167,18 @@ combined 200 msg/s toward a single target room (20 clients × 10 msg/s). The
 simultaneously probe from a single source. The 1-minute registration TTL bounds
 client lifetime regardless of re-REG activity.
 
+**Per-session guess cap (v0.2.7):** each distinct SPAKE2 point a peer answers
+with a confirm gives the point's sender one offline-checkable guess at the
+code. The relay's rate limits do not bound this against a malicious or on-path
+relay (the relay leg is plaintext UDP), so the client enforces the bound
+itself: at most 8 candidates per exchange, never evicted, and the next new
+point aborts the exchange with a "retry with a new code" error. Before v0.2.7
+the table evicted its oldest entry and kept answering, allowing roughly 18,000
+guesses per exchange through an honest relay and ~45,000 from an on-path
+attacker (the 500 MSGD/s client cap × 90 s); a weak user-chosen code could fall
+within a single session. An attacker can still abort exchanges by flooding a
+room (denial of service), but cannot get more than 8 guesses per session.
+
 #### Pre-image Attack on Code Generation
 
 If the attacker steals the code in transit or via side channel, all security is
@@ -253,8 +265,9 @@ The relay could forge a `MSGD` to a peer, pretending to be the other peer.
 which itself requires knowledge of the password scalar. Without the code, the relay
 cannot compute a valid HMAC that `subtle.ConstantTimeCompare` would accept. The
 relay also cannot decrypt the encrypted address payload (AES-256-GCM under the
-encryption key, with sorted blinding points as AAD). Client-side caps (50 candidates,
-200 buffered confirms) bound the memory and CPU cost of injected messages.
+encryption key, with sorted blinding points as AAD). Client-side caps (8 candidates,
+200 buffered confirms) bound the memory and CPU cost of injected messages and the
+number of code guesses per session.
 
 #### Relay Performs a Room Collision Attack
 
@@ -285,8 +298,8 @@ re-bound on the same local port for hole punching and QUIC.
 **Residual risk:** The connected-socket defense is kernel-level and does not
 rely on application-layer IP comparison. An attacker who can compromise the
 kernel or the relay itself can still inject messages, but the SPAKE2 and
-confirm HMACs prevent impersonation without the code. Client-side caps (50
-candidates, 200 buffered confirms) continue to bound resource usage.
+confirm HMACs prevent impersonation without the code. Client-side caps (8
+candidates, 200 buffered confirms) continue to bound resource usage and guesses.
 
 ---
 
@@ -977,12 +990,13 @@ or more peers register in the same room simultaneously, their spake2 and
 confirm messages are broadcast to all members. The stateless exchange handles
 this gracefully: each received point becomes a separate candidate with its own
 confirm retry cycle, and confirms are tried against all candidates (capped at
-50 candidates and 200 buffered confirms to bound resource usage). Only the
-peer sharing the correct code will produce a valid confirm HMAC.
+8 candidates and 200 buffered confirms). Only the peer sharing the correct code
+will produce a valid confirm HMAC. A ninth distinct point aborts the exchange,
+because every candidate is also a guess at the code (see Online Brute-Force).
 
-**Workaround:** Use unique codes per pair. This is not a security issue
-(incorrect session keys result in HMAC failure) but is a
-usability limitation.
+**Workaround:** Use unique codes per pair. A room crowded past the candidate
+cap fails with a "retry with a new code" error; a fresh code also picks a new
+room. This is a usability limitation, not a security issue.
 
 ### Code Entropy Ceiling
 

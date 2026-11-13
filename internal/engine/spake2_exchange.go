@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -16,10 +17,17 @@ import (
 )
 
 const (
-	pointLen            = 65
-	spake2PayloadLen    = pointLen*2 + fingerprintSize
-	fingerprintSize     = 32
-	maxCandidates       = 50
+	pointLen         = 65
+	spake2PayloadLen = pointLen*2 + fingerprintSize
+	fingerprintSize  = 32
+	// maxCandidates bounds online password guessing. Every distinct SPAKE2
+	// point we answer with a confirm gives its sender one offline-checkable
+	// guess at the code, so an attacker in the room (or an on-path/malicious
+	// relay) must not be able to cycle points through the table. Candidates
+	// are never evicted: once the table is full, the next new point aborts
+	// the exchange. Eight leaves room for a few concurrent pairs sharing a
+	// room while capping guesses per session at eight instead of thousands.
+	maxCandidates       = 8
 	maxBufferedConfirms = 200
 	readBufferSize      = 1500
 	// maxInboundMSGDPerSecond bounds work an on-path/malicious relay can
@@ -169,6 +177,11 @@ func detectOutboundAddr(udpConn *net.UDPConn) string {
 	return net.JoinHostPort("localhost", port)
 }
 
+// errTooManyCandidates is returned when more distinct SPAKE2 points arrive
+// than maxCandidates allows: either the room is crowded or someone is
+// guessing the code. A fresh code (and room) is the remedy in both cases.
+var errTooManyCandidates = errors.New("too many SPAKE2 peers in room (possible code-guessing attempt); retry with a new code")
+
 type peerCandidate struct {
 	point, fingerprint, confirmKey, encKey []byte
 	confirmPayload                         []byte
@@ -176,10 +189,13 @@ type peerCandidate struct {
 	effectiveMyPoint                       []byte
 }
 
-func registerAndExchange(ctx context.Context, udpConn *net.UDPConn, room, code string, myFingerprint []byte, cfg PeerConfig) (peerAddr string, peerFingerprint []byte, isServer bool, err error) {
+// registerAndExchange runs the relay registration and SPAKE2 exchange. On
+// success, confirmMsg is the relay-ready confirm that matched, which the
+// caller keeps resending (see lingerConfirm) in case the peer missed it.
+func registerAndExchange(ctx context.Context, udpConn *net.UDPConn, room, code string, myFingerprint []byte, cfg PeerConfig) (peerAddr string, peerFingerprint []byte, isServer bool, confirmMsg []byte, err error) {
 	state, err := spake2.NewState(code)
 	if err != nil {
-		return "", nil, false, fmt.Errorf("spake2 state: %w", err)
+		return "", nil, false, nil, fmt.Errorf("spake2 state: %w", err)
 	}
 	myPointM := state.BlindedBytesM()
 	myPointN := state.BlindedBytesN()
@@ -221,11 +237,11 @@ func registerAndExchange(ctx context.Context, udpConn *net.UDPConn, room, code s
 	for {
 		select {
 		case <-ctx.Done():
-			return "", nil, false, ctx.Err()
+			return "", nil, false, nil, ctx.Err()
 		default:
 		}
 		if time.Now().After(deadline) {
-			return "", nil, false, fmt.Errorf("timeout exchanging with peer")
+			return "", nil, false, nil, fmt.Errorf("timeout exchanging with peer")
 		}
 
 		if time.Since(lastRegSent) > regInterval {
@@ -256,7 +272,7 @@ func registerAndExchange(ctx context.Context, udpConn *net.UDPConn, room, code s
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue
 			}
-			return "", nil, false, fmt.Errorf("relay read: %w", err)
+			return "", nil, false, nil, fmt.Errorf("relay read: %w", err)
 		}
 
 		line := bytes.TrimSpace(readBuf[:n])
@@ -331,35 +347,20 @@ func registerAndExchange(ctx context.Context, udpConn *net.UDPConn, room, code s
 				util.LogSPAKE2.Printf("Invalid SPAKE2 message: %v", pErr)
 				continue
 			}
+			if len(candidates) >= maxCandidates {
+				// Abort rather than evict: answering this point would hand
+				// its sender another guess at the code. Only validated
+				// points reach here, so malformed payloads cannot trigger it.
+				spake2.ZeroBytes(ck)
+				spake2.ZeroBytes(ek)
+				return "", nil, false, nil, errTooManyCandidates
+			}
 			cp, pErr := buildConfirmPayload(ck, ek, effectiveMyPoint, effectivePeerPoint, myFingerprint, fp, []byte(myAddr))
 			if pErr != nil {
 				util.LogSPAKE2.Printf("Failed to build confirm payload: %v", pErr)
 				spake2.ZeroBytes(ck)
 				spake2.ZeroBytes(ek)
 				continue
-			}
-
-			if len(candidates) >= maxCandidates {
-				// Never hard-drop new points, but only evict after the new
-				// payload has passed validation, so invalid payloads cannot
-				// evict legitimate candidates. Drop the candidate whose
-				// confirm was sent longest ago; the real peer retries every
-				// 2 s and can re-enter.
-				evictKey := ""
-				var evictAt time.Time
-				for k := range candidates {
-					t := confirmLastSent[k]
-					if evictKey == "" || t.Before(evictAt) {
-						evictKey, evictAt = k, t
-					}
-				}
-				if c, ok := candidates[evictKey]; ok {
-					spake2.ZeroBytes(c.confirmKey)
-					spake2.ZeroBytes(c.encKey)
-				}
-				delete(candidates, evictKey)
-				delete(confirmLastSent, evictKey)
-				util.LogSPAKE2.Printf("SPAKE2 candidate table full (%d), evicting oldest", maxCandidates)
 			}
 			candidates[payloadHex] = &peerCandidate{
 				point: effectivePeerPoint, fingerprint: fp, confirmKey: ck, encKey: ek,
@@ -378,7 +379,7 @@ func registerAndExchange(ctx context.Context, udpConn *net.UDPConn, room, code s
 					continue
 				}
 				util.LogSPAKE2.PrintfSuccess("Peer authenticated (buffered)")
-				return pa, fp, srv, nil
+				return pa, fp, srv, []byte(fmt.Sprintf("MSG %s confirm %x\n", room, cp)), nil
 			}
 		}
 
@@ -391,7 +392,7 @@ func registerAndExchange(ctx context.Context, udpConn *net.UDPConn, room, code s
 					continue
 				}
 				util.LogSPAKE2.PrintfSuccess("Peer authenticated")
-				return pa, cand.fingerprint, cand.isServer, nil
+				return pa, cand.fingerprint, cand.isServer, []byte(fmt.Sprintf("MSG %s confirm %x\n", room, cand.confirmPayload)), nil
 			}
 
 			if len(bufferedConfirms) < maxBufferedConfirms {

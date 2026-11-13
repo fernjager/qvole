@@ -27,7 +27,7 @@ func TestListenForPunch_ReceivesFromCorrectPeer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go listenForPunch(ctx, listener, peerAddr, recvCh)
+	go listenForPunch(ctx, listener, peerAddr, nil, recvCh)
 
 	// give listener time to start
 	time.Sleep(50 * time.Millisecond)
@@ -58,7 +58,7 @@ func TestListenForPunch_AcceptsSameIPDifferentPort(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	go listenForPunch(ctx, listener, peerAddr, recvCh)
+	go listenForPunch(ctx, listener, peerAddr, nil, recvCh)
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -85,7 +85,7 @@ func TestListenForPunch_NilPeerAddr(t *testing.T) {
 	defer cancel()
 
 	// nil peer addr means accept from anyone
-	go listenForPunch(ctx, listener, nil, recvCh)
+	go listenForPunch(ctx, listener, nil, nil, recvCh)
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -106,7 +106,7 @@ func TestListenForPunch_ContextCancel(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		listenForPunch(ctx, listener, nil, recvCh)
+		listenForPunch(ctx, listener, nil, nil, recvCh)
 		close(done)
 	}()
 
@@ -129,7 +129,7 @@ func TestStartHolePunching_SendsPackets(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	startHolePunching(ctx, puncher, peerAddr)
+	startHolePunching(ctx, puncher, peerAddr, nil)
 
 	// should receive at least one punch packet
 	receiver.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -150,7 +150,7 @@ func TestStartHolePunching_ContextCancel(t *testing.T) {
 	peerAddr := receiver.LocalAddr().(*net.UDPAddr)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	ch := startHolePunching(ctx, puncher, peerAddr)
+	ch := startHolePunching(ctx, puncher, peerAddr, nil)
 
 	// let it send a few packets
 	time.Sleep(100 * time.Millisecond)
@@ -190,7 +190,7 @@ func TestStartHolePunching_DetectsPeer(t *testing.T) {
 		}
 	}()
 
-	ch := startHolePunching(ctx, puncher, peerAddr)
+	ch := startHolePunching(ctx, puncher, peerAddr, nil)
 
 	select {
 	case addr := <-ch:
@@ -210,7 +210,7 @@ func TestListenForPunch_ZeroLengthPacket(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	go listenForPunch(ctx, listener, nil, recvCh)
+	go listenForPunch(ctx, listener, nil, nil, recvCh)
 	time.Sleep(50 * time.Millisecond)
 
 	// Send zero-length packet; listenForPunch should n<=0 continue
@@ -231,7 +231,7 @@ func TestListenForPunch_NonTimeoutReadError(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		listenForPunch(ctx, listener, nil, recvCh)
+		listenForPunch(ctx, listener, nil, nil, recvCh)
 		close(done)
 	}()
 
@@ -244,5 +244,36 @@ func TestListenForPunch_NonTimeoutReadError(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("listenForPunch did not exit after connection close")
+	}
+}
+
+// TestListenForPunch_IgnoresRelaySameIP is the regression test for port
+// correction onto the relay: with the relay on the peer's IP, forwarded MSGDs
+// must not count as a punch (both peers then "corrected" to the relay port).
+func TestListenForPunch_IgnoresRelaySameIP(t *testing.T) {
+	listener := newUDPConn(t)
+	relay := newUDPConn(t)
+	peer := newUDPConn(t)
+
+	relayAddr := relay.LocalAddr().(*net.UDPAddr)
+	peerAddr := peer.LocalAddr().(*net.UDPAddr)
+	recvCh := make(chan *net.UDPAddr, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go listenForPunch(ctx, listener, peerAddr, relayAddr, recvCh)
+	time.Sleep(50 * time.Millisecond)
+
+	relay.WriteTo([]byte("MSGD spake2 00\n"), listener.LocalAddr())
+	time.Sleep(100 * time.Millisecond)
+	peer.WriteTo([]byte("punch"), listener.LocalAddr())
+
+	select {
+	case got := <-recvCh:
+		if got.Port != peerAddr.Port {
+			t.Fatalf("punch attributed to %v; want peer %v (relay %v must be ignored)", got, peerAddr, relayAddr)
+		}
+	case <-ctx.Done():
+		t.Fatal("did not receive punch from peer")
 	}
 }

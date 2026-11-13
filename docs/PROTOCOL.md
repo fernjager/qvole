@@ -137,7 +137,9 @@ symmetric key from the code without the relay learning the code or the key.
 The exchange is **stateless**: peers broadcast their SPAKE2 points continuously
 and respond to every incoming point with a confirm. Each received point becomes
 an independent *candidate* with its own confirm retry cycle. Candidates are capped
-at 50 and buffered confirms at 200 to bound resource consumption. Incoming confirms
+at 8 and never evicted: each answered point is one guess at the code for its
+sender, so a ninth distinct point aborts the exchange. Buffered confirms are
+capped at 200. Incoming confirms
 are buffered and tried against all known candidates. The exchange exits on the
 first matching confirm or after the **90-second exchange deadline**; no phase
 coordination, no single-in-flight state machine, no replacement logic, no
@@ -291,7 +293,11 @@ Peer A                                    Peer B
 - Intervals ramp: 50 ms → 100 ms → 200 ms (changed every 5 attempts).
 - Payload sizes cycle: 5 B → 50 B → 100 B → 200 B (random content).
 - A concurrent listener on the same UDP socket detects any packet from the
-  peer's address; this signals success.
+  peer's IP (any port, for port-changing NATs), ignoring the relay's own
+  address; this signals success.
+- Throughout punching and the QUIC handshake (up to 10 s), each peer resends
+  its matching confirm to the relay every 500 ms, so a peer whose copy was
+  lost can still finish the exchange.
 
 **Timeout:** 10 s (configurable via `QVOLE_PUNCH_TIMEOUT_MS`). If hole punching
 times out, QUIC establishment is attempted anyway; the OS may already have an

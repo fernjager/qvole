@@ -98,7 +98,7 @@ func ConnectPeerWithConfig(ctx context.Context, relayAddr string, code string, c
 		return nil, false, fmt.Errorf("dial relay: %w", err)
 	}
 
-	peerAddrStr, peerFingerprint, isServer, err := registerAndExchange(ctx, exchangeConn, room, code, myFingerprint, cfg)
+	peerAddrStr, peerFingerprint, isServer, confirmMsg, err := registerAndExchange(ctx, exchangeConn, room, code, myFingerprint, cfg)
 	localAddr, ok := exchangeConn.LocalAddr().(*net.UDPAddr)
 	exchangeConn.Close()
 	if !ok {
@@ -124,6 +124,14 @@ func ConnectPeerWithConfig(ctx context.Context, relayAddr string, code string, c
 		return nil, false, fmt.Errorf("expected *net.UDPConn, got %T", pc)
 	}
 
+	// The peer may still be waiting for our confirm: we stop answering the
+	// moment its confirm arrives, so if our last confirm was lost the peer
+	// would time out. Keep resending it via the relay from the same local
+	// port (the relay still sees our registered address) until we connect.
+	lingerCtx, lingerCancel := context.WithTimeout(ctx, confirmLingerTimeout)
+	defer lingerCancel()
+	go lingerConfirm(lingerCtx, udpConn, relayUDPAddr, confirmMsg)
+
 	peerUDPAddr, err := net.ResolveUDPAddr("udp", peerAddrStr)
 	if err != nil {
 		udpConn.Close()
@@ -145,7 +153,7 @@ func ConnectPeerWithConfig(ctx context.Context, relayAddr string, code string, c
 
 	punchTimeout := cfg.punchTimeout()
 	punchCtx, cancel := context.WithTimeout(ctx, punchTimeout)
-	successCh := startHolePunching(punchCtx, udpConn, peerUDPAddr)
+	successCh := startHolePunching(punchCtx, udpConn, peerUDPAddr, relayUDPAddr)
 	select {
 	case observedAddr := <-successCh:
 		if observedAddr == nil {
@@ -224,6 +232,8 @@ const (
 	confirmRandPad       = 32
 	ConfirmPayloadSize   = ConfirmMinSize + confirmRandPad
 	defaultPunchTimeout  = 10 * time.Second
+	confirmLingerTimeout = 10 * time.Second
+	confirmLingerPeriod  = 500 * time.Millisecond
 	helperTimeout        = 3 * time.Second
 	helperTickerInterval = 50 * time.Millisecond
 	codeOutputFmt        = "QVOLE_CODE=%s\n"
@@ -231,3 +241,23 @@ const (
 )
 
 var keepalivePayload = []byte{0x01}
+
+// lingerConfirm resends our matching confirm to the relay every
+// confirmLingerPeriod until ctx ends, so a peer whose copy was lost can still
+// finish the exchange. Duplicates are harmless: a peer that already finished
+// has left the room or ignores them.
+func lingerConfirm(ctx context.Context, conn *net.UDPConn, relay *net.UDPAddr, msg []byte) {
+	if len(msg) == 0 {
+		return
+	}
+	t := time.NewTicker(confirmLingerPeriod)
+	defer t.Stop()
+	for {
+		conn.WriteTo(msg, relay) // best-effort, like the exchange's own sends
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}

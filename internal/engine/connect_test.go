@@ -118,7 +118,7 @@ func TestRegisterAndExchange_SPAKE2PayloadTooShort(t *testing.T) {
 	// Start registerAndExchange in background; it will send REG and SPAKE2
 	resultCh := make(chan error, 1)
 	go func() {
-		_, _, _, err := registerAndExchange(ctx, udpConn, "testroom1", "test-code-for-spake2", testFingerprint, PeerConfig{})
+		_, _, _, _, err := registerAndExchange(ctx, udpConn, "testroom1", "test-code-for-spake2", testFingerprint, PeerConfig{})
 		resultCh <- err
 	}()
 
@@ -170,7 +170,7 @@ func TestRegisterAndExchange_ConfirmBeforeSPAKE2(t *testing.T) {
 
 	resultCh := make(chan error, 1)
 	go func() {
-		_, _, _, err := registerAndExchange(ctx, udpConn, "testroom2", "test-code-for-spake2", testFingerprint, PeerConfig{})
+		_, _, _, _, err := registerAndExchange(ctx, udpConn, "testroom2", "test-code-for-spake2", testFingerprint, PeerConfig{})
 		resultCh <- err
 	}()
 
@@ -221,7 +221,7 @@ func TestRegisterAndExchange_ConfirmPayloadTooShort(t *testing.T) {
 
 	resultCh := make(chan error, 1)
 	go func() {
-		_, _, _, err := registerAndExchange(ctx, udpConn, "testroom3", "test-code-for-spake2", testFingerprint, PeerConfig{})
+		_, _, _, _, err := registerAndExchange(ctx, udpConn, "testroom3", "test-code-for-spake2", testFingerprint, PeerConfig{})
 		resultCh <- err
 	}()
 
@@ -278,7 +278,7 @@ func TestRegisterAndExchange_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
 
-	_, _, _, err = registerAndExchange(ctx, udpConn, "testroom4", "test-code-for-spake2", []byte("fp"), PeerConfig{})
+	_, _, _, _, err = registerAndExchange(ctx, udpConn, "testroom4", "test-code-for-spake2", []byte("fp"), PeerConfig{})
 	if err != context.Canceled {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
@@ -368,7 +368,7 @@ func TestRegisterAndExchange_ExchangeTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	_, _, _, err = registerAndExchange(ctx, udpConn, "timeout-test", fmt.Sprintf("timeout-test-code-%d", time.Now().UnixNano()), []byte("fp"), PeerConfig{})
+	_, _, _, _, err = registerAndExchange(ctx, udpConn, "timeout-test", fmt.Sprintf("timeout-test-code-%d", time.Now().UnixNano()), []byte("fp"), PeerConfig{})
 	if err == nil {
 		t.Fatal("expected error for unresponsive relay")
 	}
@@ -392,7 +392,7 @@ func TestRegisterAndExchange_NonTimeoutNetError(t *testing.T) {
 
 	resultCh := make(chan error, 1)
 	go func() {
-		_, _, _, err := registerAndExchange(ctx, udpConn, "testroom-neterr", "test-code-neterr-test", testFingerprint, PeerConfig{})
+		_, _, _, _, err := registerAndExchange(ctx, udpConn, "testroom-neterr", "test-code-neterr-test", testFingerprint, PeerConfig{})
 		resultCh <- err
 	}()
 

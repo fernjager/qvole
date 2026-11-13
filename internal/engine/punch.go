@@ -21,7 +21,12 @@ var (
 	punchPayloadSizes = []int{5, 50, 100, 200}
 )
 
-func listenForPunch(ctx context.Context, udpConn *net.UDPConn, peerAddr *net.UDPAddr, recvCh chan<- *net.UDPAddr) {
+// listenForPunch reports the first datagram from the peer's IP. Datagrams from
+// relayAddr itself are skipped: when the relay shares the peer's IP (a
+// self-hosted relay behind the peer's NAT, or loopback testing), its
+// forwarded MSGDs would otherwise count as a punch and "correct" the peer
+// port to the relay's.
+func listenForPunch(ctx context.Context, udpConn *net.UDPConn, peerAddr, relayAddr *net.UDPAddr, recvCh chan<- *net.UDPAddr) {
 	buf := make([]byte, punchBufferSize)
 	for {
 		select {
@@ -45,6 +50,9 @@ func listenForPunch(ctx context.Context, udpConn *net.UDPConn, peerAddr *net.UDP
 				continue
 			}
 		}
+		if relayAddr != nil && addr.IP.Equal(relayAddr.IP) && addr.Port == relayAddr.Port {
+			continue
+		}
 		util.LogHole.Printf("Punch packet received from %s", addr)
 		select {
 		case recvCh <- addr:
@@ -54,7 +62,7 @@ func listenForPunch(ctx context.Context, udpConn *net.UDPConn, peerAddr *net.UDP
 	}
 }
 
-func startHolePunching(ctx context.Context, udpConn *net.UDPConn, peerAddr *net.UDPAddr) <-chan *net.UDPAddr {
+func startHolePunching(ctx context.Context, udpConn *net.UDPConn, peerAddr, relayAddr *net.UDPAddr) <-chan *net.UDPAddr {
 	successCh := make(chan *net.UDPAddr, 1)
 	go func() {
 		defer close(successCh)
@@ -62,7 +70,7 @@ func startHolePunching(ctx context.Context, udpConn *net.UDPConn, peerAddr *net.
 		punchDone := make(chan struct{})
 		go func() {
 			defer close(punchDone)
-			listenForPunch(ctx, udpConn, peerAddr, recvCh)
+			listenForPunch(ctx, udpConn, peerAddr, relayAddr, recvCh)
 		}()
 
 		payloads := make([][]byte, len(punchPayloadSizes))

@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.7] - 2026-11-13
+
+### Security
+- Cap SPAKE2 candidates at 8 per exchange with no eviction, aborting on the
+  next new point; each answered point was an online guess at the code.
+- Build and test with Go 1.27.4 security release; pin CI and container builds to it.
+
+### Fixed
+- Keep resending the matching SPAKE2 confirm via the relay after the
+  exchange, so a lost final confirm no longer fails the session after 90 s.
+- Ignore the relay's own address during hole punching, so a relay sharing the
+  peer's IP is no longer mistaken for the peer.
+
+### Changed
+- Update `golang.org/x/crypto` to v0.59.0 and `golang.org/x/sys` to v0.50.0,
+  and bump the binary version to 0.2.7.
+
 ## [0.2.6] - 2026-11-08
 
 ### Security
